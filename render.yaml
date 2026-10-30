@@ -32,3 +32,6 @@ services:
 
       - key: YOUPI_EXPOSE_DEV_OTP
         value: "false"
+
+      - key: YOUPI_ENFORCE_OBSERVER_HEALTH
+        value: "false"

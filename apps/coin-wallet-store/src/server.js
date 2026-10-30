@@ -597,10 +597,13 @@ export class CoinWalletStoreServer {
               createdAt: Date.now()
             });
 
-            // Normalize checkoutUrl for localhost development / testing to prevent tunnel offline issues
-            let resolvedCheckoutUrl = payment.checkoutUrl;
-            if (this.publicBaseUrl.includes('localhost') || this.publicBaseUrl.includes('127.0.0.1')) {
-              resolvedCheckoutUrl = `${this.publicBaseUrl}/checkout/${payment.paymentId}`;
+            // Normalize checkoutUrl: Use relative path `/checkout/:id` so it always works seamlessly on any cloud origin or port
+            let resolvedCheckoutUrl = `/checkout/${payment.paymentId}`;
+            if (payment.checkoutUrl && !payment.checkoutUrl.includes('localhost:7000')) {
+              try {
+                const u = new URL(payment.checkoutUrl);
+                if (u.protocol === 'https:') resolvedCheckoutUrl = payment.checkoutUrl;
+              } catch {}
             }
 
             res.writeHead(200, {
@@ -613,8 +616,9 @@ export class CoinWalletStoreServer {
               checkoutUrl: resolvedCheckoutUrl
             }));
           } catch (err) {
+            console.error('[Store Checkout Error]:', err.message);
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unable to create payment' }));
+            res.end(JSON.stringify({ error: err.message || 'Unable to create payment' }));
           }
         });
         return;

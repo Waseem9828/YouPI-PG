@@ -19,6 +19,9 @@ console.log('====================================================');
 console.log('🚀 Starting YOUPI PG Cloud Unified Host for Render/Cloud');
 console.log('====================================================');
 
+// Default to allowing checkout creation even before an Android observer phone is paired
+process.env.YOUPI_ENFORCE_OBSERVER_HEALTH = process.env.YOUPI_ENFORCE_OBSERVER_HEALTH || 'false';
+
 // 1. Initialize core services in-memory
 const paymentApp = createPaymentApp();
 const coreServer = paymentApp.rawServer;

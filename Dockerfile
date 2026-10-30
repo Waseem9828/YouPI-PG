@@ -84,8 +84,7 @@ EXPOSE 10000 5000 6001 6002 6003 6100 7000 8090
 
 USER youpi
 
-# Native healthcheck pinging unified cloud gateway or payment api
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD wget -qO- "http://127.0.0.1:${PORT:-10000}/health" || wget -qO- http://127.0.0.1:6100/health || exit 1
+# Render handles health checking via its platform HTTP health check path (/health)
+HEALTHCHECK NONE
 
 CMD ["node", "scripts/start.js"]
