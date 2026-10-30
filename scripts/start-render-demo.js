@@ -158,6 +158,7 @@ const unifiedServer = http.createServer((req, res) => {
     pathname === '/admin' ||
     pathname.startsWith('/admin/') ||
     pathname.startsWith('/api/admin/') ||
+    pathname.startsWith('/api/v1/admin/') ||
     pathname.startsWith('/api/services') ||
     pathname === '/api/logs/stream'
   ) {

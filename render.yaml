@@ -35,3 +35,6 @@ services:
 
       - key: YOUPI_ENFORCE_OBSERVER_HEALTH
         value: "false"
+
+      - key: ADMIN_API_TOKEN
+        generateValue: true

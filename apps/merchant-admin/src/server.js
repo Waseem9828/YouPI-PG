@@ -78,6 +78,7 @@ export class AdminServer {
 
     const appName = (process.env.DEFAULT_APP_NAME || '').trim() || 'YOUPI PG';
     const primaryColor = (process.env.DEFAULT_PRIMARY_COLOR || '').trim() || '#2563eb';
+    const adminToken = getAdminToken();
 
     let html = this.template;
     // Always use empty string '' so client fetch calls hit the merchant admin's own /api proxy!
@@ -86,6 +87,7 @@ export class AdminServer {
     html = html.replaceAll('{{API_BASE_URL}}', clientApiBase);
     html = html.replaceAll('{{APP_NAME}}', appName);
     html = html.replaceAll('{{DEFAULT_PRIMARY_COLOR}}', primaryColor);
+    html = html.replaceAll('{{DEFAULT_ADMIN_TOKEN}}', adminToken || '');
     return html;
   }
 

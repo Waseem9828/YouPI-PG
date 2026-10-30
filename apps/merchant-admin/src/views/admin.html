@@ -3791,10 +3791,22 @@
     // data/.secrets/admin_api_token on the server). It is kept in sessionStorage for this tab only.
     window.__youpiAdminAuth = (function () {
       const KEY = 'youpi_admin_token';
+      const defaultToken = "{{DEFAULT_ADMIN_TOKEN}}".trim();
       const nativeFetch = window.fetch.bind(window);
       let pending = null;
 
-      const read = () => { try { return sessionStorage.getItem(KEY) || ''; } catch (e) { return ''; } };
+      const read = () => {
+        try {
+          const current = sessionStorage.getItem(KEY) || '';
+          if (!current && defaultToken && !defaultToken.startsWith('{{')) {
+            sessionStorage.setItem(KEY, defaultToken);
+            return defaultToken;
+          }
+          return current;
+        } catch (e) {
+          return defaultToken && !defaultToken.startsWith('{{') ? defaultToken : '';
+        }
+      };
       const write = (t) => { try { sessionStorage.setItem(KEY, t); } catch (e) {} };
       const clear = () => { try { sessionStorage.removeItem(KEY); } catch (e) {} };
 
@@ -4481,18 +4493,23 @@
     async function fetchLiveData() {
       try {
         const qRes = await fetch(`${API_BASE}/api/v1/admin/queue`);
-        const qData = await qRes.json();
-        renderSlotActive(qData.currentSlot);
-        renderSlotProcessing(qData.currentSlot);
-        renderQueueTable(qData.queue || []);
+        let qData = { queue: [] };
+        if (qRes.ok) {
+          qData = await qRes.json();
+          renderSlotActive(qData.currentSlot);
+          renderSlotProcessing(qData.currentSlot);
+          renderQueueTable(qData.queue || []);
+        }
 
         const pRes = await fetch(`${API_BASE}/api/v1/admin/payments`);
-        const pData = await pRes.json();
-        updateKpis(pData.payments || [], qData.queue || []);
+        if (pRes.ok) {
+          const pData = await pRes.json();
+          updateKpis(pData.payments || [], qData.queue || []);
 
-        if (activeSection === 'operations' && activeSubTab === 'subViewOpsCounter') {
-          if (currentSellingMode === 'ONLINE') fetchCodOrders();
-          else renderCounterDesk(pData.payments || []);
+          if (activeSection === 'operations' && activeSubTab === 'subViewOpsCounter') {
+            if (currentSellingMode === 'ONLINE') fetchCodOrders();
+            else renderCounterDesk(pData.payments || []);
+          }
         }
       } catch (e) { }
     }
