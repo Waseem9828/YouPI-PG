@@ -53,6 +53,9 @@ const unifiedServer = http.createServer((req, res) => {
       service: 'youpi-pg-unified',
       timestamp: new Date().toISOString()
     }));
+    return;
+  }
+
   // Root URL: Redirect to demo store
   if (pathname === '/' || pathname === '') {
     res.writeHead(302, { Location: '/store' });
