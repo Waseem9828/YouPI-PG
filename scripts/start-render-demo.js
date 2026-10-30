@@ -40,6 +40,55 @@ const storeService = new CoinWalletStoreServer({
 });
 const storeServer = storeService.createServer();
 
+// Static asset directories across workspaces
+const staticRoots = [
+  path.resolve(rootDir, 'apps/coin-wallet-store/public'),
+  path.resolve(rootDir, 'apps/checkout-portal/public'),
+  path.resolve(rootDir, 'apps/merchant-admin/public')
+];
+
+const MIME_TYPES = {
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
+  '.apk': 'application/vnd.android.package-archive',
+  '.yaml': 'text/yaml; charset=utf-8',
+  '.ico': 'image/x-icon'
+};
+
+function tryServeStatic(pathname, res) {
+  const cleanPath = path.normalize(pathname).replace(/^(\.\.(\/|\\|$))+/, '');
+  for (const root of staticRoots) {
+    const filePath = path.join(root, cleanPath);
+    const rel = path.relative(root, filePath);
+    if (!rel.startsWith('..') && !path.isAbsolute(rel) && fs.existsSync(filePath)) {
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.isFile()) {
+          const ext = path.extname(filePath).toLowerCase();
+          const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+          res.writeHead(200, {
+            'Content-Type': contentType,
+            'Content-Length': stat.size,
+            'Cache-Control': ext === '.css' || ext === '.js' ? 'no-cache' : 'public, max-age=86400',
+            'Access-Control-Allow-Origin': '*'
+          });
+          fs.createReadStream(filePath).pipe(res);
+          return true;
+        }
+      } catch {}
+    }
+  }
+  return false;
+}
+
 // 2. Gateway router dispatching to the appropriate sub-service based on path
 const unifiedServer = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -63,26 +112,84 @@ const unifiedServer = http.createServer((req, res) => {
     return;
   }
 
-  // Core Payment API: /api/*
+  // Universal integration SDK script
+  if (pathname === '/youpi.js' || pathname === '/sdk/youpi.js' || pathname === '/sdk/youpi-checkout.js') {
+    const sdkPath = path.resolve(rootDir, 'apps/checkout-portal/src/sdk/youpi.js');
+    if (fs.existsSync(sdkPath)) {
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(fs.readFileSync(sdkPath, 'utf8'));
+      return;
+    }
+  }
+
+  // OpenAPI Specification
+  if (pathname === '/openapi.yaml') {
+    const openApiPath = path.resolve(rootDir, 'openapi.yaml');
+    if (fs.existsSync(openApiPath)) {
+      res.writeHead(200, {
+        'Content-Type': 'text/yaml; charset=utf-8',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(fs.readFileSync(openApiPath, 'utf8'));
+      return;
+    }
+  }
+
+  // Android Companion APK download
+  if (pathname === '/youpi-sms-gateway.apk' || pathname === '/api/v1/admin/sms-gateway/download-apk') {
+    adminServer.emit('request', req, res);
+    return;
+  }
+
+  // Check static file caches first (/css/*, /js/*, /assets/*, /icons/*, /fonts/*)
+  if (tryServeStatic(pathname, res)) {
+    return;
+  }
+
+  // Merchant Admin and Admin API endpoints
+  if (
+    pathname === '/admin' ||
+    pathname.startsWith('/admin/') ||
+    pathname.startsWith('/api/admin/') ||
+    pathname.startsWith('/api/services') ||
+    pathname === '/api/logs/stream'
+  ) {
+    adminServer.emit('request', req, res);
+    return;
+  }
+
+  // Demo Showcase Store pages & store APIs:
+  // /store, /wallet, /order-*, /success, /failed, /suspicious, /expired, /cancelled, /api/checkout, /api/wallet-balance, /api/verify-payment, /api/webhook
+  if (
+    pathname === '/store' ||
+    pathname.startsWith('/store/') ||
+    pathname === '/wallet' ||
+    pathname.startsWith('/order-') ||
+    pathname === '/success' ||
+    pathname === '/failed' ||
+    pathname === '/suspicious' ||
+    pathname === '/expired' ||
+    pathname === '/cancelled' ||
+    pathname === '/api/checkout' ||
+    pathname === '/api/wallet-balance' ||
+    pathname === '/api/verify-payment' ||
+    pathname === '/api/webhook'
+  ) {
+    storeServer.emit('request', req, res);
+    return;
+  }
+
+  // Core Payment API: /api/v1/*
   if (pathname.startsWith('/api/')) {
     coreServer.emit('request', req, res);
     return;
   }
 
-  // Merchant Admin: /admin or /admin/*
-  if (pathname === '/admin' || pathname.startsWith('/admin/')) {
-    adminServer.emit('request', req, res);
-    return;
-  }
-
-  // Demo Showcase Store: /store, /wallet, /order-*
-  if (pathname === '/store' || pathname.startsWith('/store/') || pathname === '/wallet' || pathname.startsWith('/order-')) {
-    storeServer.emit('request', req, res);
-    return;
-  }
-
-  // Default: Checkout portal & universal integration SDK
-  // /youpi.js, /checkout/*, /icons/*, /css/*, /js/*, /
+  // Checkout Portal customer pages & iframe: /checkout/*
   checkoutServer.emit('request', req, res);
 });
 
