@@ -472,8 +472,11 @@
         if (badge) badge.innerText = '+91 ' + currentAuthMobile;
         const otpInput = document.getElementById('authOtpInput');
         if (otpInput) {
-          otpInput.value = '';
+          otpInput.value = lastReceivedDevOtp || '';
           setTimeout(() => otpInput.focus(), 50);
+        }
+        if (lastReceivedDevOtp) {
+          showOptionToast(`[WhatsApp Standby] Test OTP: ${lastReceivedDevOtp}`);
         }
         startOtpCooldown(30);
       }
