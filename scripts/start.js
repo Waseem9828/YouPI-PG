@@ -45,10 +45,16 @@ if (runInLocalhostMode) {
   console.log('====================================================');
 }
 
-// 1. Run database migrations & load persisted configuration (Part B3: never overwrite settings)
-console.log('[1/3] Loading persisted production database & settings...');
-const migrationResult = runMigrations();
-const merchant = migrationResult.defaultMerchant;
+// Check if running on a single-port PaaS environment (e.g., Render, Railway, Koyeb)
+const isCloudPaaS = Boolean(process.env.PORT && !process.env.PAYMENT_API_PORT && !process.env.CLOUDFLARE_DOMAIN);
+if (isCloudPaaS) {
+  console.log(`[i] Single-port cloud environment detected (PORT=${process.env.PORT}). Delegating to unified cloud gateway...`);
+  await import('./start-render-demo.js');
+} else {
+  // 1. Run database migrations & load persisted configuration (Part B3: never overwrite settings)
+  console.log('[1/3] Loading persisted production database & settings...');
+  const migrationResult = runMigrations();
+  const merchant = migrationResult.defaultMerchant;
 const branding = merchant?.branding || {};
 
 // 2. Validate Production Configuration (Part B2 & Part I)
@@ -137,5 +143,6 @@ const shutdown = async () => {
   process.exit(0);
 };
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
