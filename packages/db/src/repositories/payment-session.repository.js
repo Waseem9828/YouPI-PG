@@ -65,6 +65,15 @@ export class PaymentSessionRepository {
     return this.mapRow(row);
   }
 
+  findByOrderIdGlobal(orderId) {
+    const row = this.db.queryOne(
+      'SELECT * FROM payment_sessions WHERE order_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+      [orderId]
+    );
+    if (!row) return null;
+    return this.mapRow(row);
+  }
+
   findByCustomerId(customerId) {
     const rows = this.db.query(
       'SELECT * FROM payment_sessions WHERE customer_id = ? ORDER BY created_at DESC',

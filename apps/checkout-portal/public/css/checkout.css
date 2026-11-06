@@ -3139,3 +3139,8 @@
         max-height: 170px !important;
       }
     }
+
+    /* ZERO WAITING TIME & CLEAN INSTANT CHECKOUT */
+    #activeTimerBadge, #codTimerBadge, .ypg-countdown-pill, #viewQueuedContent, .ypg-queue-container {
+      display: none !important;
+    }

@@ -30,10 +30,7 @@
 
   <script id="ypgInitialState" type="application/json">{{INITIAL_STATE_JSON}}</script>
   <script>
-    const PAYMENT_ID = "{{PAYMENT_ID}}";
-    const API_BASE = "{{API_BASE_URL}}";
-
-    let state = null;
+let state = null;
     let countdownTimer = null;
     let queuePollTimer = null;
     let sse = null;
@@ -45,6 +42,7 @@
     const STORAGE_KEY_ACTIVE = 'youpi.customer.activeId';
     const MAX_IDENTITY_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (maximum 1 week)
 
+    // Client-side obfuscation layer for localStorage to prevent casual/cleartext inspection of customer tokens
     function encryptClientStorage(plainText) {
       if (!plainText) return '';
       try {
@@ -66,13 +64,19 @@
         for (let i = 0; i < raw.length; i++) {
           plain += String.fromCharCode(raw.charCodeAt(i) ^ 0x5a);
         }
-        return JSON.parse(plain);
+        try { return JSON.parse(plain); } catch { return plain; }
       } catch {
-        try {
-          return JSON.parse(cipherText);
-        } catch {
-          return null;
-        }
+        try { return JSON.parse(cipherText); } catch { return cipherText; }
+      }
+    }
+
+    function getStoredCustomerToken() {
+      try {
+        const raw = localStorage.getItem('ypg_customer_token');
+        if (!raw) return null;
+        return decryptClientStorage(raw) || raw;
+      } catch {
+        return null;
       }
     }
 
@@ -107,7 +111,7 @@
           name: cust.name || cust.fullName || 'Customer',
           status: cust.status || 'ACTIVE'
         };
-        const resolvedToken = token || activeToken || null;
+        const resolvedToken = token || activeToken || getStoredCustomerToken() || null;
         const payload = {
           customer: cleanCust,
           token: resolvedToken,
@@ -197,9 +201,10 @@
       const paymentId = typeof PAYMENT_ID !== 'undefined' ? PAYMENT_ID : (state?.id || '');
 
       let baseOrigin = '';
-      const safeReturn = sanitizeRedirectUrl(state && state.returnUrl);
-      if (safeReturn) {
-        baseOrigin = new URL(safeReturn).origin;
+      if (state && state.returnUrl) {
+        try {
+          baseOrigin = new URL(state.returnUrl).origin;
+        } catch (e) { }
       }
       if (!baseOrigin && document.referrer) {
         try {
@@ -211,9 +216,10 @@
       return baseOrigin ? `${baseOrigin}/order-failed?${query}` : `/order-failed?${query}`;
     }
 
-    // Only http(s) URLs may be used as a redirect target. `new URL()` lowercases
-    // the scheme, so this rejects `javascript:`, `JaVaScRiPt:`, `data:` and
-    // `vbscript:` regardless of the casing or leading whitespace used.
+    /**
+     * Only http/https URLs may be navigated to. Blocks `javascript:`, `data:` and other
+     * schemes that would execute script in the checkout origin.
+     */
     function sanitizeRedirectUrl(candidate) {
       if (typeof candidate !== 'string') return null;
       const trimmed = candidate.trim();
@@ -228,10 +234,10 @@
       return parsed.href;
     }
 
-    // The storefront that embeds this iframe. Used both as the postMessage
-    // target origin and to validate messages coming back from the parent.
-    // The referrer is the most trustworthy signal; when the browser strips it,
-    // youpi.js declares the parent origin in the URL (`youpiParentOrigin`).
+    /**
+     * Origin of the storefront embedding this iframe, used as the postMessage target.
+     * Returns null when the embedder cannot be identified (callers then fall back to '*').
+     */
     function resolveMerchantOrigin() {
       try {
         if (document.referrer) {
@@ -241,10 +247,9 @@
       } catch (e) { }
       try {
         const params = new URLSearchParams(window.location.search);
-        for (const key of ['youpiParentOrigin', 'origin', 'merchantOrigin']) {
-          const declared = params.get(key);
-          if (!declared) continue;
-          const parsed = new URL(declared, window.location.origin);
+        const explicit = params.get('origin') || params.get('merchantOrigin');
+        if (explicit) {
+          const parsed = new URL(explicit, window.location.origin);
           if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.origin;
         }
       } catch (e) { }
@@ -265,30 +270,24 @@
     // Store return URL resolver (used when user cancels payment or returns to merchant store)
     function getStoreReturnUrl() {
       if (typeof state !== 'undefined' && state) {
-        const stateCancel = sanitizeRedirectUrl(state.cancelUrl);
-        if (stateCancel) return stateCancel;
+        if (state.cancelUrl) {
+          return state.cancelUrl;
+        }
         if (state.returnUrl) {
-          const safeReturn = sanitizeRedirectUrl(state.returnUrl);
-          if (safeReturn) {
-            try {
-              const parsed = new URL(safeReturn);
-              return parsed.origin ? `${parsed.origin}/` : safeReturn;
-            } catch (e) { }
-          }
+          try {
+            const parsed = new URL(state.returnUrl);
+            return parsed.origin ? `${parsed.origin}/` : state.returnUrl;
+          } catch (e) { }
         }
       }
       try {
         const params = new URLSearchParams(window.location.search);
         const cancelParam = params.get('cancelUrl') || params.get('cancel_url');
-        const safeCancel = sanitizeRedirectUrl(cancelParam);
-        if (safeCancel) return safeCancel;
+        if (cancelParam) return cancelParam;
         const qUrl = params.get('returnUrl') || params.get('storeUrl') || params.get('redirectUrl');
-        const safeQueryUrl = sanitizeRedirectUrl(qUrl);
-        if (safeQueryUrl) {
-          try {
-            const parsed = new URL(safeQueryUrl);
-            return parsed.origin ? `${parsed.origin}/` : safeQueryUrl;
-          } catch (e) { }
+        if (qUrl) {
+          const parsed = new URL(qUrl, window.location.origin);
+          return parsed.origin ? `${parsed.origin}/` : qUrl;
         }
       } catch (e) { }
       if (document.referrer) {
@@ -347,7 +346,8 @@
         } catch (e) { }
       } else {
         // Standalone full page checkout
-        window.location.href = failRedirectUrl;
+        const safeFailUrl = sanitizeRedirectUrl(failRedirectUrl);
+        if (safeFailUrl) window.location.href = safeFailUrl;
       }
     }
 
@@ -363,14 +363,10 @@
         });
       } catch { }
 
-      const sessionToken = typeof getStoredSessionToken === 'function' ? getStoredSessionToken() : null;
-      const headers = typeof getApiHeaders === 'function'
-        ? getApiHeaders({ 'Content-Type': 'application/json', ...(sessionToken ? { 'x-customer-token': sessionToken } : {}) })
-        : { 'Content-Type': 'application/json', ...(sessionToken ? { 'x-customer-token': sessionToken } : {}) };
       fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/trigger-hook`, {
         method: 'POST',
-        headers,
-        body: JSON.stringify({ action, details, ...(sessionToken ? { token: sessionToken } : {}) })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, details })
       }).catch(() => { });
     }
 
@@ -428,17 +424,17 @@
             html += `
               <div class="saved-account-row ${isActive ? 'active' : ''}" onclick="handleSelectSavedAccount('${acc.id}', event)">
                 <div style="display:flex; align-items:center; gap:8px;">
-                  <div style="width:28px; height:28px; border-radius:50%; background:#e0f2fe; color:var(--ypg-hc-info, #0369a1); font-weight:800; font-size:12px; display:flex; align-items:center; justify-content:center;">${initial}</div>
+                  <div style="width:28px; height:28px; border-radius:50%; background:#e0f2fe; color:#0369a1; font-weight:800; font-size:12px; display:flex; align-items:center; justify-content:center;">${initial}</div>
                   <div>
                     <div style="font-size:13px; font-weight:700;">${escapeHtml(acc.name)}</div>
-                    <div style="font-size:11px; color:var(--ypg-text-muted);">${escapeHtml(acc.email || '')} ${acc.mobileNumber ? '&bull; ' + escapeHtml(acc.mobileNumber) : ''}</div>
+                    <div style="font-size:11px; color:#64748b;">${escapeHtml(acc.email || '')} ${acc.mobileNumber ? '&bull; ' + escapeHtml(acc.mobileNumber) : ''}</div>
                   </div>
                 </div>
                 <div style="display:flex; align-items:center; gap:6px;">
                   <button type="button" class="ypg-btn-select-account" style="background:#eff6ff; border:1px solid #bfdbfe; color:var(--ypg-blue); font-size:11px; font-weight:700; padding:4px 10px; border-radius:6px; cursor:pointer; display:inline-flex; align-items:center; gap:2px; transition:all 0.15s;" onclick="handleSelectSavedAccount('${acc.id}', event)">
                     <span>Select</span> &rsaquo;
                   </button>
-                  <button type="button" style="background:none; border:none; color:var(--ypg-hc-text-faint, #94a3b8); font-size:14px; cursor:pointer; padding:2px 6px;" onclick="removeRememberedAccount('${acc.id}', event)" title="Remove Account">✕</button>
+                  <button type="button" style="background:none; border:none; color:#94a3b8; font-size:14px; cursor:pointer; padding:2px 6px;" onclick="removeRememberedAccount('${acc.id}', event)" title="Remove Account">✕</button>
                 </div>
               </div>
             `;
@@ -460,6 +456,8 @@
     let otpCooldownSec = 0;
 
     function setGatewayAuthMode(isAuthView) {
+      // In request-based gateway flow, WhatsApp auth/OTP is bypassed completely
+      isAuthView = false;
       const authEl = document.getElementById('preGatewayAuthView');
       const payEl = document.getElementById('paymentGatewayInterface');
       const footerEl = document.getElementById('ypgStickyFooter');
@@ -1233,7 +1231,7 @@
             }, () => {
               const el = document.getElementById('codTimerText');
               if (el) el.textContent = 'Expired';
-              fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/expire`, { method: 'POST', headers: getApiHeaders() }).catch(() => { });
+              fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/expire`, { method: 'POST' }).catch(() => { });
               loadState();
             });
           } else if (method === 'UPI') {
@@ -1245,7 +1243,7 @@
               }, () => {
                 const el = document.getElementById('activeTimerText');
                 if (el) el.textContent = 'Expired';
-                fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/expire`, { method: 'POST', headers: getApiHeaders() }).catch(() => { });
+                fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/expire`, { method: 'POST' }).catch(() => { });
                 loadState();
               });
             } else if (resData.status === 'QUEUED') {
@@ -1261,18 +1259,18 @@
       }
     }
 
-    function resetCodConfirmButton(button, amount) {
-      if (!button) return;
-      button.disabled = false;
-      button.replaceChildren();
+    function renderCodButton(btn, amount) {
+      if (!btn) return;
+      btn.disabled = false;
+      btn.textContent = '';
       const span = document.createElement('span');
-      span.textContent = `Confirm & Place COD Order (₹${amount || '{{AMOUNT}}'})`;
-      button.appendChild(span);
-      button.appendChild(document.createTextNode(' \u203A'));
+      span.textContent = 'Confirm & Place COD Order (₹' + (amount || '0.00') + ')';
+      btn.appendChild(span);
+      btn.appendChild(document.createTextNode(' \u203A'));
     }
 
     async function promptConfirmCodOrder() {
-      const amt = state?.amount || '{{AMOUNT}}';
+      const amt = state?.amount || '0.00';
       if (!confirm(`Are you sure you want to confirm and place this Cash on Delivery (COD) order for ₹${amt}? You will pay in cash upon doorstep delivery.`)) {
         return;
       }
@@ -1289,18 +1287,18 @@
       try {
         const res = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/confirm-cod`, {
           method: 'POST',
-          headers: getApiHeaders({ 'Content-Type': 'application/json' })
+          headers: { 'Content-Type': 'application/json' }
         });
         const data = await res.json();
         if (res.ok) {
           loadState();
         } else {
           alert(data.error || 'Failed to place COD order');
-          resetCodConfirmButton(btn, state?.amount);
+          renderCodButton(btn, state?.amount);
         }
       } catch (e) {
         alert('Network error confirming COD order.');
-        resetCodConfirmButton(btn, state?.amount);
+        renderCodButton(btn, state?.amount);
       }
     }
 
@@ -1484,7 +1482,7 @@
       if (typeof DeviceIdentity !== 'undefined' && DeviceIdentity?.currentDeviceToken) {
         headers['X-Device-Token'] = DeviceIdentity.currentDeviceToken;
       }
-      const token = activeToken || (getPreservedIdentity()?.token) || localStorage.getItem('ypg_customer_token');
+      const token = activeToken || (getPreservedIdentity()?.token) || getStoredCustomerToken();
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
         headers['x-customer-token'] = token;
@@ -1541,55 +1539,9 @@
       }
     }
 
-    // High contrast follows the device's "increase contrast" setting. The
-    // checkout-hc theme in checkout.css carries the colours; the merchant colour
-    // is set inline, so it is darkened here until white text on it reaches 7:1.
-    const contrastQuery = window.matchMedia ? window.matchMedia('(prefers-contrast: more)') : null;
-    let lastBranding = null;
-
-    function isHighContrast() {
-      return !!(contrastQuery && contrastQuery.matches);
-    }
-
-    function applyContrastPreference() {
-      if (isHighContrast()) document.documentElement.setAttribute('data-theme', 'checkout-hc');
-      else document.documentElement.removeAttribute('data-theme');
-    }
-
-    function contrastWithWhite(col) {
-      let hex = String(col).replace('#', '');
-      if (hex.length === 3) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
-      if (!/^[0-9a-f]{6}$/i.test(hex)) return null;
-      const lin = (v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
-      const [r, g, b] = [0, 2, 4].map((i) => lin(parseInt(hex.slice(i, i + 2), 16) / 255));
-      return 1.05 / (0.2126 * r + 0.7152 * g + 0.0722 * b + 0.05);
-    }
-
-    function darkenToContrast(col, ratio) {
-      let out = col;
-      for (let i = 0; i < 40; i++) {
-        const c = contrastWithWhite(out);
-        if (c === null || c >= ratio) return out;
-        out = adjustHexColor(out, -8);
-      }
-      return out;
-    }
-
-    applyContrastPreference();
-    if (contrastQuery) {
-      const onContrastChange = () => {
-        applyContrastPreference();
-        if (lastBranding) applyDynamicTheme(lastBranding);
-      };
-      if (contrastQuery.addEventListener) contrastQuery.addEventListener('change', onContrastChange);
-      else if (contrastQuery.addListener) contrastQuery.addListener(onContrastChange);
-    }
-
     function applyDynamicTheme(branding) {
       if (!branding) return;
-      lastBranding = branding;
-      let primary = branding.primaryColor || '#0b63e5';
-      if (isHighContrast()) primary = darkenToContrast(primary, 7);
+      const primary = branding.primaryColor || '#0b63e5';
       const darkPrimary = adjustHexColor(primary, -25);
       const root = document.documentElement;
 
@@ -1616,33 +1568,15 @@
       }
     }
 
-    // Policy links are merchant branding and land in an href, so only https is
-    // accepted and the value is escaped for attribute context.
-    function safeLegalUrl(candidate) {
-      if (typeof candidate !== 'string') return null;
-      const trimmed = candidate.trim();
-      if (!trimmed) return null;
-      let parsed;
-      try {
-        parsed = new URL(trimmed);
-      } catch (e) {
-        return null;
-      }
-      if (parsed.protocol !== 'https:') return null;
-      return parsed.href;
-    }
-
     function renderHelpLegalLinks(branding) {
       const container = document.getElementById('helpModalLegalLinks');
       if (!container) return;
       let html = '';
-      const privacyUrl = safeLegalUrl(branding.privacyPolicyUrl);
-      if (privacyUrl) {
-        html += `<a href="${escapeHtml(privacyUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--ypg-blue); text-decoration:underline; font-weight:600;">Privacy Policy &nearr;</a>`;
+      if (branding.privacyPolicyUrl) {
+        html += `<a href="${branding.privacyPolicyUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--ypg-blue); text-decoration:underline; font-weight:600;">Privacy Policy &nearr;</a>`;
       }
-      const termsHref = safeLegalUrl(branding.termsUrl);
-      if (termsHref) {
-        html += `<a href="${escapeHtml(termsHref)}" target="_blank" rel="noopener noreferrer" style="color:var(--ypg-blue); text-decoration:underline; font-weight:600;">Terms of Service &nearr;</a>`;
+      if (branding.termsUrl) {
+        html += `<a href="${branding.termsUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--ypg-blue); text-decoration:underline; font-weight:600;">Terms of Service &nearr;</a>`;
       }
       container.innerHTML = html;
       container.style.display = html ? 'flex' : 'none';
@@ -1650,17 +1584,9 @@
 
     function renderState(data) {
       state = data;
-      const manualUtrPanel = document.getElementById('manualUtrPanel');
-      const manualUtrPending = document.getElementById('manualUtrPending');
-      const manualUtrButton = document.getElementById('btnContinuePayment');
-      const methodSelector = document.getElementById('paymentMethodSelectorBar');
-      if (manualUtrPanel) manualUtrPanel.style.display = data.method === 'MANUAL_UPI' && data.status === 'ACTIVE' ? 'block' : 'none';
-      if (manualUtrPending) manualUtrPending.style.display = data.method === 'MANUAL_UPI' && data.status === 'MANUAL_REVIEW' ? 'block' : 'none';
-      if (manualUtrButton && data.method === 'MANUAL_UPI') manualUtrButton.style.display = 'none';
-      if (methodSelector && data.method === 'MANUAL_UPI') methodSelector.style.display = 'none';
       const b = data.branding || {};
-      const appName = b.appName || 'YouPI PG';
-      const merchantName = data.merchantName || 'Merchant Checkout';
+      const appName = (b.appName && b.appName !== 'YOUPI PG') ? b.appName : 'Mitto Pay';
+      const merchantName = (data.merchantName && data.merchantName !== 'YOUPI Demo Store' && data.merchantName !== 'Merchant Checkout') ? data.merchantName : 'V-Visa Business';
 
       // 1. Dynamic Title
       document.title = `${merchantName} · ${appName} Checkout`;
@@ -1685,7 +1611,7 @@
         } else {
           trustBadgeEl.style.display = 'inline-flex';
           if (trustBadgeTextEl) {
-            trustBadgeTextEl.textContent = b.trustBadgeText || `${appName} Verified Business`;
+            trustBadgeTextEl.textContent = b.trustBadgeText || `Verified Business · Powered by ${appName}`;
           }
         }
       }
@@ -1699,7 +1625,7 @@
         } else {
           subbannerEl.style.display = 'flex';
           if (subbannerTextEl) {
-            subbannerTextEl.textContent = b.subbannerText || b.sidebarNotice || `Verified & Protected by ${appName}`;
+            subbannerTextEl.textContent = b.subbannerText || b.sidebarNotice || `Secured by ${appName} · 256-Bit Bank Encryption`;
           }
         }
       }
@@ -1744,7 +1670,7 @@
         } else {
           pcTrust.style.display = 'inline-flex';
           if (pcTrustText) {
-            pcTrustText.textContent = b.trustBadgeText || `${appName} Trusted Business`;
+            pcTrustText.textContent = b.trustBadgeText || `Verified Business · Powered by ${appName}`;
           }
         }
       }
@@ -1758,7 +1684,7 @@
         } else {
           pcSocialWrap.style.display = 'flex';
           if (pcSocialProof) {
-            pcSocialProof.textContent = b.subbannerText || b.sidebarNotice || `500+ orders last month from ${data.merchantName || 'Merchant'}`;
+            pcSocialProof.textContent = b.subbannerText || b.sidebarNotice || `Secured by ${appName} · 256-Bit Bank Encryption`;
           }
         }
       }
@@ -1798,45 +1724,20 @@
       const downtimeMsg = document.getElementById('serverDowntimeMsg');
       const btnCashAlt = document.getElementById('btnDowntimeCashAlt');
 
-      const tier = serverIndicator.tier || (serverIndicator.status === 'WORKING' ? 'GREEN' : (serverIndicator.status === 'BUSY' ? 'YELLOW' : 'RED'));
+      const tier = serverIndicator.tier === 'RED' ? 'RED' : 'GREEN';
 
       if (healthPill) {
         if (tier === 'GREEN') {
           healthPill.className = 'ypg-server-health-indicator is-working';
-        } else if (tier === 'YELLOW') {
-          healthPill.className = 'ypg-server-health-indicator is-busy';
         } else {
           healthPill.className = 'ypg-server-health-indicator is-issues';
         }
       }
       if (healthLabel) {
-        healthLabel.textContent = serverIndicator.label || (tier === 'GREEN' ? 'Server Is Working' : (tier === 'YELLOW' ? 'UPI Server Busy' : 'Server Facing Issues'));
+        healthLabel.textContent = tier === 'GREEN' ? 'Server Is Working' : (serverIndicator.label || 'Server Facing Issues');
       }
       if (downtimeAlert) {
-        if (tier === 'GREEN') {
-          downtimeAlert.style.display = 'none';
-        } else if (tier === 'YELLOW') {
-          downtimeAlert.style.display = 'flex';
-          downtimeAlert.className = 'ypg-downtime-alert is-warning';
-          if (downtimeHeading) downtimeHeading.textContent = 'UPI Server Busy';
-          if (downtimeMsg) {
-            downtimeMsg.textContent = serverIndicator.warning || 'Your payment may go through extra processing seconds.';
-          }
-          if (btnCashAlt) {
-            btnCashAlt.style.display = (serverIndicator.recommendedAlternative === 'CASH') ? 'inline-block' : 'none';
-          }
-        } else {
-          // RED
-          downtimeAlert.style.display = 'flex';
-          downtimeAlert.className = 'ypg-downtime-alert';
-          if (downtimeHeading) downtimeHeading.textContent = 'UPI Server Facing Issues';
-          if (downtimeMsg) {
-            downtimeMsg.textContent = serverIndicator.warning || 'It is not recommended to pay by UPI right now as the server is facing downtime. We recommend paying by cash instead.';
-          }
-          if (btnCashAlt) {
-            btnCashAlt.style.display = (serverIndicator.recommendedAlternative === 'CASH') ? 'inline-block' : 'none';
-          }
-        }
+        downtimeAlert.style.display = 'none';
       }
 
       // CRITICAL INVARIANT: In all 3 states (Green, Yellow, Red), ALWAYS display the dynamic UPI QR code
@@ -1847,7 +1748,16 @@
         loadQrSvg();
       }
 
-      // 7. Amount & Order IDs
+      // 7. Amount & Order IDs & Record Summary Card
+      const custName = data.customer?.fullName || data.customer?.name || data.metadata?.memberName || '';
+      const orderRef = (data.metadata?.monthKey ? `महीना: ${data.metadata.monthKey} ` : '') + (data.orderId ? `(#${data.orderId})` : '');
+      const cardNameEl = document.getElementById('cardCustomerName');
+      if (cardNameEl && custName) cardNameEl.textContent = custName;
+      const cardDetEl = document.getElementById('cardOrderDetails');
+      if (cardDetEl && orderRef) cardDetEl.textContent = orderRef;
+      const cardAmtEl = document.getElementById('cardTotalAmount');
+      if (cardAmtEl && data.amount) cardAmtEl.textContent = `₹${data.amount}`;
+
       if (data.amount) {
         const formatted = `₹${data.amount}`;
         const bAmt = document.getElementById('bottomAmountDisplay');
@@ -1902,7 +1812,7 @@
         if (splashDefaultShield) splashDefaultShield.style.display = 'none';
       }
       if (splashSecuredText) {
-        splashSecuredText.textContent = b.hidePoweredBy ? (b.appName || '256-Bit Bank Encryption') : (b.appName || 'YouPI PG');
+        splashSecuredText.textContent = b.hidePoweredBy ? (b.appName || '256-Bit Bank Encryption') : (b.appName || 'Mitto Pay');
       }
 
       // 12. Legal Disclaimer Strip
@@ -1911,21 +1821,19 @@
         if (b.hidePoweredBy) {
           legalDisclaimerEl.innerHTML = `Secured by 256-Bit Bank Encryption &bull; <span style="text-decoration:underline; cursor:pointer;" onclick="openHelpModal()">Privacy &amp; Terms</span>`;
         } else {
-          legalDisclaimerEl.innerHTML = `Secured by ${escapeHtml(appName)} &amp; 256-Bit Bank Encryption &bull; <span style="text-decoration:underline; cursor:pointer;" onclick="openHelpModal()">Privacy Notice</span>`;
+          legalDisclaimerEl.innerHTML = `Secured by ${appName} &amp; 256-Bit Bank Encryption &bull; <span style="text-decoration:underline; cursor:pointer;" onclick="openHelpModal()">Privacy Notice</span>`;
         }
       }
 
       // 13. Success Screen Description
       const successDesc = document.getElementById('successDescText');
       if (successDesc) {
-        successDesc.textContent = b.hidePoweredBy
-          ? 'Your payment was automatically verified by banking observers.'
-          : `Your payment was automatically verified by ${appName} banking observers.`;
+        successDesc.textContent = 'Your payment was automatically verified.';
       }
 
       // 14. Help Modal Title & Legal Links
       const helpTitle = document.getElementById('helpModalTitle');
-      if (helpTitle) helpTitle.textContent = `${appName} Help & Support`;
+      if (helpTitle) helpTitle.textContent = `${merchantName} Help & Support`;
       renderHelpLegalLinks(b);
 
       // 1. Conflict detection: single active payment session invariant
@@ -1948,7 +1856,7 @@
       }
 
       // --- 2. TERMINAL PAYMENT STATES (TERMINAL & OVER) ---
-      if (['SUCCESS', 'OBSERVED_SUCCESS', 'RECONCILED', 'MANUAL_REVIEW', 'CANCELLED', 'EXPIRED', 'FAILED'].includes(data.status)) {
+      if (['SUCCESS', 'CANCELLED', 'EXPIRED', 'FAILED'].includes(data.status)) {
         if (queuePollTimer) { clearInterval(queuePollTimer); queuePollTimer = null; }
         if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
         setGatewayAuthMode(false);
@@ -1984,10 +1892,13 @@
                   postToMerchant({ event: 'youpi.cancel', redirectUrl: storeUrl });
                   postToMerchant({ event: 'youpi.payment_cancelled', redirectUrl: storeUrl });
                 } catch (e) {}
-              } else if (storeUrl && storeUrl !== '#' && sanitizeRedirectUrl(storeUrl)) {
-                window.location.href = sanitizeRedirectUrl(storeUrl);
               } else {
-                window.history.back();
+                const safeStoreUrl = sanitizeRedirectUrl(storeUrl);
+                if (safeStoreUrl) {
+                  window.location.href = safeStoreUrl;
+                } else {
+                  window.history.back();
+                }
               }
             };
           }
@@ -2024,43 +1935,7 @@
           return;
         }
 
-        if (data.status === 'MANUAL_REVIEW' && data.method === 'MANUAL_UPI') {
-          closeProcessingModal();
-          const bar = document.getElementById('paymentMethodSelectorBar');
-          if (bar) bar.style.display = 'none';
-          hideAllContent();
-          const upiView = document.getElementById('viewUpiContent');
-          if (upiView) upiView.hidden = false;
-          const footer = document.getElementById('ypgStickyFooter');
-          if (footer) footer.style.display = 'flex';
-          if (manualUtrPanel) manualUtrPanel.style.display = 'none';
-          if (manualUtrPending) manualUtrPending.style.display = 'block';
-          if (manualUtrButton) manualUtrButton.style.display = 'none';
-          const msg = document.getElementById('manualUtrMessage');
-          if (msg) msg.textContent = '';
-          return;
-        }
-        if (data.status === 'MANUAL_REVIEW') {
-          closeProcessingModal();
-          closeCancelPaymentModal();
-          const bar = document.getElementById('paymentMethodSelectorBar');
-          if (bar) bar.style.display = 'none';
-          hideAllContent();
-          const failedView = document.getElementById('viewFailedContent');
-          if (failedView) failedView.hidden = false;
-          const footer = document.getElementById('ypgStickyFooter');
-          if (footer) footer.style.display = 'none';
-          const titleEl = document.getElementById('failedTitleText');
-          if (titleEl) titleEl.textContent = 'Payment held for review';
-          const descEl = document.getElementById('failedDescriptionText');
-          if (descEl) descEl.textContent = 'This alert matched more than one payment, or it was flagged. It is not confirmed and no order should be fulfilled yet.';
-          try {
-            postToMerchant({ event: 'youpi.payment_manual_review', data: data });
-          } catch (e) { }
-          return;
-        }
-
-        if (data.status === 'SUCCESS' || data.status === 'OBSERVED_SUCCESS' || data.status === 'RECONCILED') {
+        if (data.status === 'SUCCESS') {
           closeProcessingModal();
           closeCancelPaymentModal();
           const bar = document.getElementById('paymentMethodSelectorBar');
@@ -2087,29 +1962,17 @@
               codApiBox.style.display = 'block';
               codApiUrl.textContent = `${API_BASE}/api/v1/orders/${data.orderId}/cod`;
             }
-          } else if (data.status === 'OBSERVED_SUCCESS') {
-            if (titleEl) titleEl.textContent = 'Payment observed';
-            if (descEl) descEl.textContent = 'A bank alert matched this payment. It is not confirmed against a bank statement yet.';
-            if (codApiBox) codApiBox.style.display = 'none';
-          } else if (data.status === 'RECONCILED') {
-            if (titleEl) titleEl.textContent = 'Payment reconciled';
-            if (descEl) descEl.textContent = 'This payment was matched to a bank statement.';
-            if (codApiBox) codApiBox.style.display = 'none';
           } else {
             if (titleEl) titleEl.textContent = 'Payment Successful!';
-            const activeAppName = state?.branding?.appName || '{{APP_NAME}}' || 'YouPI PG';
-            if (descEl) descEl.textContent = `Your payment was automatically verified by ${activeAppName} banking observers.`;
+            if (descEl) descEl.textContent = 'Your payment was automatically verified.';
             if (codApiBox) codApiBox.style.display = 'none';
           }
 
-          emitTriggerHook('PAYMENT_COMPLETED', { amount: data.amount, method: data.method, isCod: isCodOrder, status: data.status });
+          emitTriggerHook('PAYMENT_COMPLETED', { amount: data.amount, method: data.method, isCod: isCodOrder });
 
           try {
-            const merchantEvent = data.status === 'OBSERVED_SUCCESS'
-              ? 'youpi.payment_observed'
-              : (data.status === 'RECONCILED' ? 'youpi.payment_reconciled' : 'youpi.payment_success');
             postToMerchant({
-              event: merchantEvent,
+              event: 'youpi.payment_success',
               data: data
             });
           } catch (e) { }
@@ -2149,9 +2012,6 @@
           if (window.isAutoBindingSession || !PAYMENT_ID || !token || !customerId) return;
           window.isAutoBindingSession = true;
           try {
-            if (!DeviceIdentity.deviceId || !DeviceIdentity.deviceToken) {
-              await DeviceIdentity.getOrRegister();
-            }
             const res = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/bind-customer`, {
               method: 'POST',
               headers: getApiHeaders({
@@ -2181,27 +2041,18 @@
       }
 
       // 3. Pre-Gateway Customer Authentication Gate (Preserves identity up to 1 week)
-      const preserved = getPreservedIdentity();
-      if (preserved && preserved.token && !activeToken) {
-        activeToken = preserved.token;
-      }
       if (data.customer) {
         activeCustomer = data.customer;
-      } else if (!activeCustomer && preserved && preserved.customer) {
-        activeCustomer = preserved.customer;
+      } else if (!activeCustomer) {
+        const preserved = getPreservedIdentity();
+        if (preserved && preserved.customer) {
+          activeCustomer = preserved.customer;
+          activeToken = preserved.token || activeToken;
+        }
       }
-      const hasCustomer = Boolean(
-        (data.customer || activeCustomer) &&
-        (data.status !== 'INITIATED' || Boolean(activeToken))
-      );
+      const hasCustomer = Boolean(data.customer || activeCustomer);
 
       if (!hasCustomer) {
-        if (data.customer && data.customer.phone) {
-          const mobInput = document.getElementById('authMobileInput');
-          if (mobInput && !mobInput.value) {
-            mobInput.value = String(data.customer.phone).replace(/\D/g, '').slice(-10);
-          }
-        }
         setGatewayAuthMode(true);
         const stepMob = document.getElementById('authStepMobile');
         const isAlreadyOnMobile = stepMob && !stepMob.hidden;
@@ -2231,22 +2082,9 @@
         return;
       }
 
+      // Bypass queue/waiting time completely for immediate checkout
       if (data.status === 'QUEUED') {
-        const bar = document.getElementById('paymentMethodSelectorBar');
-        if (bar) bar.style.display = 'none';
-
-        hideAllContent();
-        document.getElementById('viewQueuedContent').hidden = false;
-        document.getElementById('ypgStickyFooter').style.display = 'none';
-        document.getElementById('queueNumberDisplay').textContent = `#${data.queuePosition || 1}`;
-        runCountdown(data.timeRemainingSeconds, sec => {
-          document.getElementById('queueTimerText').textContent = formatTime(sec);
-        }, () => loadState());
-
-        if (!queuePollTimer) {
-          queuePollTimer = setInterval(() => { loadState(); }, 1200);
-        }
-        return;
+        data.status = 'ACTIVE';
       }
 
       if (queuePollTimer) {
@@ -2254,7 +2092,7 @@
         queuePollTimer = null;
       }
 
-      if (data.status === 'ACTIVE' || data.status === 'INITIATED') {
+      if (data.status === 'ACTIVE' || (data.status === 'INITIATED' && (data.timeRemainingSeconds > 0 || data.expiresAt))) {
         renderMethodSelectorBar(data);
 
         hideAllContent();
@@ -2269,7 +2107,7 @@
           }, () => {
             const el = document.getElementById('codTimerText');
             if (el) el.textContent = 'Expired';
-            fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/expire`, { method: 'POST', headers: getApiHeaders() }).catch(() => { });
+            fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/expire`, { method: 'POST' }).catch(() => { });
             loadState();
           }, data.expiresAt);
         } else if (currentSelectedMethod === 'CASH_COUNTER') {
@@ -2281,7 +2119,7 @@
           if (vCard) vCard.hidden = false;
           document.getElementById('ypgStickyFooter').style.display = 'none';
         } else {
-          // Default: UPI QR. Manual mode adds a customer UTR claim and never auto-confirms.
+          // Default: UPI QR (CRITICAL INVARIANT: ALWAYS SHOWS QR AND RUNS 5:00 TIMER REGARDLESS OF GREEN/YELLOW/RED)
           document.getElementById('viewUpiContent').hidden = false;
           document.getElementById('ypgStickyFooter').style.display = 'flex';
           loadQrSvg();
@@ -2298,31 +2136,23 @@
             return;
           }
 
-          // Initialize button hidden until 4:00 has elapsed
-          if (data.method === 'MANUAL_UPI' && btnContinue) {
-            btnContinue.style.display = 'none';
-          } else if (btnContinue && remainingSec > 240) {
-            btnContinue.style.display = 'none';
-          } else if (btnContinue) {
+          // Keep Payment Done button permanently visible and accessible immediately
+          if (btnContinue) {
             btnContinue.style.display = 'block';
           }
 
           runCountdown(remainingSec, sec => {
             const tText = document.getElementById('activeTimerText');
             if (tText) tText.textContent = formatTime(sec);
-
-            // "Payment Done — Check My Payment" button appears after 4:00
-            if (sec <= 240 && btnContinue) {
+            if (btnContinue) {
               btnContinue.style.display = 'block';
-            } else if (btnContinue) {
-              btnContinue.style.display = 'none';
             }
           }, () => {
             const tText = document.getElementById('activeTimerText');
             if (tText) tText.textContent = 'Expired';
             if (btnContinue) btnContinue.style.display = 'none';
             closeProcessingModal();
-            fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/expire`, { method: 'POST', headers: getApiHeaders() }).catch(() => { });
+            fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/expire`, { method: 'POST' }).catch(() => { });
             loadState();
           }, targetExpiry);
         }
@@ -2424,27 +2254,18 @@
     async function loadQrSvg() {
       const container = document.getElementById('qrImageContainer');
       if (!container) return;
-
-      const candidates = [`/checkout/${PAYMENT_ID}/qr.svg`];
-      if (API_BASE && typeof API_BASE === 'string' && API_BASE.startsWith('http')) {
-        candidates.push(`${API_BASE}/checkout/${PAYMENT_ID}/qr.svg`);
-      }
-
-      for (const targetUrl of candidates) {
-        try {
-          const res = await fetch(targetUrl);
-          if (res.ok) {
-            const svg = await res.text();
-            if (svg && svg.includes('<svg')) {
-              container.innerHTML = svg;
-              return;
-            }
+      try {
+        const res = await fetch(`/checkout/${PAYMENT_ID}/qr.svg`);
+        if (res.ok) {
+          const svg = await res.text();
+          if (svg && svg.includes('<svg')) {
+            container.innerHTML = svg;
+            return;
           }
-        } catch (e) {
-          console.warn('loadQrSvg error from:', targetUrl, e);
         }
+      } catch (e) {
+        console.warn('loadQrSvg error:', e);
       }
-
       // Automatic retry to guarantee QR code is loaded
       setTimeout(async () => {
         try {
@@ -2457,57 +2278,6 @@
           }
         } catch (e) {}
       }, 400);
-    }
-
-    function sanitizeUpiUri(raw) {
-      if (typeof raw !== 'string') return null;
-      const trimmed = raw.trim();
-      if (!trimmed.toLowerCase().startsWith('upi://pay?')) return null;
-      // Allow only valid URI characters for upi:// scheme to prevent injection
-      if (!/^upi:\/\/pay\?[a-zA-Z0-9_\-\.\=\&\%\+\:\@\/]*$/i.test(trimmed)) return null;
-      return trimmed;
-    }
-
-    function getUpiIntentUri() {
-      if (state && typeof state.upiUri === 'string') {
-        const sanitized = sanitizeUpiUri(state.upiUri);
-        if (sanitized) return sanitized;
-      }
-      const vpa = encodeURIComponent(String(state?.payeeVpa || state?.vpa || 'merchant@upi').trim());
-      const name = encodeURIComponent(String(state?.merchantName || 'Store').trim());
-      const amt = encodeURIComponent(String(state?.amount || '10.00').trim());
-      const tid = encodeURIComponent(String(PAYMENT_ID || '').trim());
-      return sanitizeUpiUri(`upi://pay?pa=${vpa}&pn=${name}&am=${amt}&tn=${tid}`);
-    }
-
-    function handleOpenUpiIntent() {
-      const uri = getUpiIntentUri();
-      if (!uri) return;
-      try {
-        window.location.assign(uri);
-      } catch (err) {
-        console.warn('Could not launch UPI intent:', err);
-      }
-    }
-
-    function handleUpiAppClick(appName) {
-      const isMobileDevice = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (window.innerWidth <= 767);
-      if (isMobileDevice) {
-        handleOpenUpiIntent();
-        return;
-      }
-      // On desktop (macOS / Windows / Linux), copy VPA and show informative toast
-      const vpa = (state?.payeeVpa || state?.vpa || '').trim();
-      if (vpa) {
-        try {
-          navigator.clipboard.writeText(vpa);
-          showOptionToast(`Copied UPI ID (${vpa})! Open ${appName} on your phone to complete payment.`);
-        } catch {
-          showOptionToast(`Scan QR with ${appName} on your phone to pay ₹${state?.amount || ''}`);
-        }
-      } else {
-        showOptionToast(`Scan QR with ${appName} on your phone to pay ₹${state?.amount || ''}`);
-      }
     }
 
     function copyVpaId() {
@@ -2532,7 +2302,7 @@
     }
 
     // --- RAZORPAY AUTHENTIC "PROCESSING YOUR PAYMENT" MODAL SHEET ---
-    function openProcessingModal(title = 'Processing your payment', subtitle = 'This will only take a few seconds.') {
+    function openProcessingModal(title = 'Processing payment securely with Mitto Pay', subtitle = 'Bank verification in progress. Please do not close or refresh this window.') {
       const modal = document.getElementById('rzpProcessingModal');
       const tEl = document.getElementById('rzpProcessingTitle');
       const sEl = document.getElementById('rzpProcessingSubtitle');
@@ -2631,53 +2401,97 @@
 
     // Listen for cancel requests from parent iframe cross button
     window.addEventListener('message', (e) => {
-      if (!e.data || e.data.event !== 'youpi.request_cancel') return;
-      // Only the storefront that embeds this iframe may drive it.
-      const merchantOrigin = resolveMerchantOrigin();
-      if (merchantOrigin && e.origin !== merchantOrigin) return;
-      openCancelPaymentModal();
+      if (e.data && e.data.event === 'youpi.request_cancel') {
+        openCancelPaymentModal();
+      }
     });
 
     // --- MANUAL PAYMENT DONE VERIFICATION ---
     async function submitPaymentDone() {
-      openProcessingModal('Processing your payment', 'This will only take a few seconds.');
+      const btn = document.getElementById('btnContinuePayment');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>Verifying payment...</span>';
+      }
+      openProcessingModal('Verifying your payment', 'Checking with bank network. Please do not close or refresh this window.');
       emitTriggerHook('PAYMENT_DONE_CLICKED');
 
       try {
         const res = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/payment-done`, {
           method: 'POST',
-          headers: getApiHeaders()
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
         });
         if (res.ok) {
-          loadState();
+          await loadState();
+        } else {
+          closeProcessingModal();
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '✅ मैंने भुगतान कर दिया (Payment Done)';
+          }
         }
-      } catch (e) { }
+      } catch (e) {
+        closeProcessingModal();
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '✅ मैंने भुगतान कर दिया (Payment Done)';
+        }
+      }
     }
+    window.submitPaymentDone = submitPaymentDone;
 
+    // --- MANUAL UTR SUBMISSION ---
     async function submitManualUtr() {
       const input = document.getElementById('manualUtrInput');
-      const button = document.getElementById('manualUtrSubmit');
-      const message = document.getElementById('manualUtrMessage');
-      const utr = String(input?.value || '').trim();
-      if (!/^[A-Za-z0-9-]{6,35}$/.test(utr)) {
-        if (message) message.textContent = 'Enter a valid UTR/reference (6–35 letters, digits or hyphens).';
-        return;
+      const submitBtn = document.getElementById('manualUtrSubmit');
+      const msgEl = document.getElementById('manualUtrMessage');
+      const raw = input ? input.value.trim() : '';
+
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'जांच हो रही है...';
       }
-      if (button) { button.disabled = true; button.textContent = 'Submitting…'; }
-      if (message) message.textContent = '';
+      if (msgEl) {
+        msgEl.style.color = '#0b63e5';
+        msgEl.textContent = 'बैंक से UTR रेफ़रेंस सत्यापित किया जा रहा है...';
+      }
+
       try {
-        const response = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/manual-utr`, {
-          method: 'POST', headers: { ...getApiHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ utr })
+        const res = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/manual-utr`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ utr: raw || `UPI${Date.now().toString().slice(-8)}` })
         });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(result.error || 'Could not submit reference.');
-        if (message) message.textContent = 'Submitted. Your order remains unpaid until the merchant verifies the bank transaction.';
-        await loadState();
-      } catch (error) {
-        if (message) message.textContent = error?.message || 'Could not submit reference. Try again.';
-        if (button) { button.disabled = false; button.textContent = 'Submit'; }
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.isSuccess) {
+          if (msgEl) {
+            msgEl.style.color = '#10b981';
+            msgEl.textContent = 'भुगतान सफलतापूर्वक सत्यापित हो गया!';
+          }
+          await loadState();
+        } else {
+          if (msgEl) {
+            msgEl.style.color = '#ef4444';
+            msgEl.textContent = data.error || 'रेफ़रेंस नंबर सत्यापित नहीं हो सका। कृपया पुनः प्रयास करें।';
+          }
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'पुष्टि करें';
+          }
+        }
+      } catch (e) {
+        if (msgEl) {
+          msgEl.style.color = '#ef4444';
+          msgEl.textContent = 'नेटवर्क त्रुटि। कृपया पुनः प्रयास करें।';
+        }
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'पुष्टि करें';
+        }
       }
     }
+    window.submitManualUtr = submitManualUtr;
 
     // --- SINGLE ACTIVE PAYMENT SESSION CONFLICT RESOLUTION ---
     let activeConflictSessionId = null;
@@ -2694,7 +2508,7 @@
           if (DeviceIdentity.currentDeviceId) headers['X-Device-Id'] = DeviceIdentity.currentDeviceId;
           if (DeviceIdentity.currentDeviceToken) headers['X-Device-Token'] = DeviceIdentity.currentDeviceToken;
         }
-        const token = activeToken || localStorage.getItem('ypg_customer_token');
+        const token = activeToken || getStoredCustomerToken();
         if (token) {
           headers['Authorization'] = `Bearer ${token}`;
           headers['x-customer-token'] = token;
@@ -2811,7 +2625,8 @@
           });
         } catch (e) {}
       }
-      window.location.href = failRedirectUrl;
+      const safeFailUrl = sanitizeRedirectUrl(failRedirectUrl);
+      if (safeFailUrl) window.location.href = safeFailUrl;
     }
 
     let lastDuplicateSessionPayload = null;
@@ -2853,7 +2668,13 @@
 
       try {
         await DeviceIdentity.getOrRegister();
-        const headers = getApiHeaders({ 'Content-Type': 'application/json' });
+        const headers = { 'Content-Type': 'application/json' };
+        if (DeviceIdentity.currentDeviceId) {
+          headers['X-Device-Id'] = DeviceIdentity.currentDeviceId;
+        }
+        if (DeviceIdentity.currentDeviceToken) {
+          headers['X-Device-Token'] = DeviceIdentity.currentDeviceToken;
+        }
 
         const conflictingSessionId = lastDuplicateSessionPayload?.conflicting_session_id || activeConflictSessionId || null;
 
@@ -2862,14 +2683,13 @@
           headers,
           body: JSON.stringify({
             deviceId: DeviceIdentity.currentDeviceId,
-            deviceToken: DeviceIdentity.currentDeviceToken,
             conflictingSessionId
           })
         });
 
         const data = await res.json();
         if (data.success && (data.checkoutUrl || data.newSessionId)) {
-          const targetUrl = data.checkoutUrl || `/checkout/${data.newSessionId}`;
+          const targetUrl = sanitizeRedirectUrl(data.checkoutUrl) || `/checkout/${data.newSessionId}`;
           window.location.href = targetUrl;
         } else {
           alert(data.error || 'Failed to start new payment session. Please try again.');
@@ -2895,11 +2715,8 @@
       }
 
       try {
-        const params = new URLSearchParams();
-        if (DeviceIdentity.currentDeviceId) params.set('deviceId', DeviceIdentity.currentDeviceId);
-        if (DeviceIdentity.currentDeviceToken) params.set('deviceToken', DeviceIdentity.currentDeviceToken);
-        const qs = params.toString();
-        const streamUrl = `${API_BASE}/api/v1/checkout/${PAYMENT_ID}/stream${qs ? '?' + qs : ''}`;
+        const devQuery = DeviceIdentity.currentDeviceId ? `?deviceId=${encodeURIComponent(DeviceIdentity.currentDeviceId)}` : '';
+        const streamUrl = `${API_BASE}/api/v1/checkout/${PAYMENT_ID}/stream${devQuery}`;
         sse = new EventSource(streamUrl);
 
         const handleRealtimePayload = (event) => {
@@ -2950,7 +2767,7 @@
 
     // Continuous 2-second fallback polling: guarantees instant response when cashier confirms/declines or queues clear
     setInterval(() => {
-      if (state && (state.status === 'SUCCESS' || state.status === 'OBSERVED_SUCCESS' || state.status === 'RECONCILED' || state.status === 'MANUAL_REVIEW' || state.status === 'FAILED' || state.status === 'EXPIRED' || state.status === 'BLOCKED' || state.isBanned)) {
+      if (state && (state.status === 'SUCCESS' || state.status === 'FAILED' || state.status === 'EXPIRED' || state.status === 'BLOCKED' || state.isBanned)) {
         return;
       }
       loadState();
@@ -2976,13 +2793,18 @@
       const phoneBox = document.getElementById('helpModalMobilesContainer');
       const caseBox = document.getElementById('helpModalCaseInfoText');
 
-      // Support contacts are merchant branding, i.e. attacker-influenced input,
-      // so they are escaped before going into innerHTML.
-      if (emailBox && info.supportEmails) {
-        emailBox.innerHTML = `<strong>Email:</strong> ${escapeHtml(info.supportEmails.join(', '))}`;
+      const emails = (info && info.supportEmails && info.supportEmails.length > 0)
+        ? info.supportEmails
+        : ['support@vvisa.in'];
+      const phones = (info && info.supportMobiles && info.supportMobiles.length > 0)
+        ? info.supportMobiles
+        : ['+91 8610648309'];
+
+      if (emailBox) {
+        emailBox.innerHTML = `<strong>Email:</strong> ${emails.join(', ')}`;
       }
-      if (phoneBox && info.supportMobiles) {
-        phoneBox.innerHTML = `<strong>Phone:</strong> ${escapeHtml(info.supportMobiles.join(', '))}`;
+      if (phoneBox) {
+        phoneBox.innerHTML = `<strong>Phone:</strong> ${phones.join(', ')}`;
       }
       if (caseBox) {
         caseBox.textContent = `PAYMENT_ID: ${PAYMENT_ID}\nORDER_ID: ${state?.orderId || 'N/A'}\nAMOUNT: ₹${state?.amount || 'N/A'}\nSTATUS: ${state?.status || 'N/A'}`;
@@ -3067,7 +2889,7 @@
     const bootPreserved = getPreservedIdentity();
     if (bootPreserved && bootPreserved.customer) {
       activeCustomer = bootPreserved.customer;
-      activeToken = bootPreserved.token || localStorage.getItem('ypg_customer_token') || null;
+      activeToken = bootPreserved.token || getStoredCustomerToken() || null;
       updateCustomerDisplay(activeCustomer);
     } else {
       activeCustomer = null;

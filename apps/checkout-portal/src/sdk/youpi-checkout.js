@@ -210,11 +210,11 @@
         targetUrl = `${this.options.portalUrl}/checkout/demo`;
       }
 
-      // If running on localhost / 127.0.0.1 and targetUrl points to remote external origin, keep path and point to local host
-      if (isBrowser && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+      // Automatically keep checkout target URL on the same origin as the current page (handles localhost, LAN IP, and tunnels)
+      if (isBrowser) {
         try {
           const parsed = new URL(targetUrl, window.location.origin);
-          if (parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1' && !this.options.portalUrl) {
+          if (targetUrl.startsWith('/') || parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || (!this.options.portalUrl && parsed.origin !== window.location.origin)) {
             targetUrl = `${window.location.protocol}//${window.location.host}${parsed.pathname}${parsed.search}`;
           }
         } catch {}
@@ -602,6 +602,10 @@
       const suspiciousUrl = btn.getAttribute('data-suspicious-url') || scriptConfig.suspiciousUrl || '';
       const expiredUrl = btn.getAttribute('data-expired-url') || scriptConfig.expiredUrl || '';
       const cancelledUrl = btn.getAttribute('data-cancelled-url') || scriptConfig.cancelledUrl || '';
+
+      if (!checkoutUrl && !paymentId) {
+        return;
+      }
 
       YoupiCheckout.pay({
         order_id: orderId,

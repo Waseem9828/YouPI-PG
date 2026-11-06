@@ -210,6 +210,16 @@
         targetUrl = `${this.options.portalUrl}/checkout/demo`;
       }
 
+      // Automatically keep checkout target URL on the same origin as the current page (handles localhost, LAN IP, and tunnels)
+      if (isBrowser) {
+        try {
+          const parsed = new URL(targetUrl, window.location.origin);
+          if (targetUrl.startsWith('/') || parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || (!this.options.portalUrl && parsed.origin !== window.location.origin)) {
+            targetUrl = `${window.location.protocol}//${window.location.host}${parsed.pathname}${parsed.search}`;
+          }
+        } catch {}
+      }
+
       // Add embedded flag and custom params
       const sep = targetUrl.includes('?') ? '&' : '?';
       targetUrl = `${targetUrl}${sep}embedded=1`;
@@ -592,6 +602,10 @@ _isSafeRedirect(url) {
       const suspiciousUrl = btn.getAttribute('data-suspicious-url') || scriptConfig.suspiciousUrl || '';
       const expiredUrl = btn.getAttribute('data-expired-url') || scriptConfig.expiredUrl || '';
       const cancelledUrl = btn.getAttribute('data-cancelled-url') || scriptConfig.cancelledUrl || '';
+
+      if (!checkoutUrl && !paymentId) {
+        return;
+      }
 
       YoupiCheckout.pay({
         order_id: orderId,

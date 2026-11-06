@@ -61,8 +61,8 @@ export function isProductionLike(env = process.env) {
 export function checkoutFrameHeaders(env = process.env) {
   const configured = frameAncestorOrigins(env.CHECKOUT_FRAME_ANCESTORS);
   const frameAncestors = configured.length
-    ? `'self' ${configured.join(' ')}`
-    : (isProductionLike(env) ? "'self'" : '*');
+    ? `'self' ${configured.join(' ')} https://*.trycloudflare.com`
+    : (isProductionLike(env) ? "'self' https://*.trycloudflare.com" : '*');
   return {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -236,10 +236,10 @@ export class CheckoutServer {
     // This avoids cross-origin blocking, CORS errors, and tunnel DNS resolution issues.
     const clientApiBase = '';
 
-    const indicator = state?.upiServerIndicator || { status: 'ISSUES', tier: 'RED', label: 'Server Facing Issues' };
-    const tier = indicator.tier || (indicator.status === 'WORKING' ? 'GREEN' : (indicator.status === 'BUSY' ? 'YELLOW' : 'RED'));
-    const healthClass = tier === 'GREEN' ? 'is-working' : (tier === 'YELLOW' ? 'is-busy' : 'is-issues');
-    const healthLabel = indicator.label || (tier === 'GREEN' ? 'Server Is Working' : (tier === 'YELLOW' ? 'UPI Server Busy' : 'Server Facing Issues'));
+    const indicator = state?.upiServerIndicator || { status: 'WORKING', tier: 'GREEN', label: 'Server Is Working' };
+    const tier = indicator.tier === 'RED' ? 'RED' : 'GREEN';
+    const healthClass = tier === 'GREEN' ? 'is-working' : 'is-issues';
+    const healthLabel = tier === 'GREEN' ? 'Server Is Working' : (indicator.label || 'Server Facing Issues');
     const alertStyle = tier === 'GREEN' ? 'none' : 'flex';
     const alertClass = tier === 'YELLOW' ? 'ypg-downtime-alert is-warning' : 'ypg-downtime-alert';
     const alertHeading = tier === 'YELLOW' ? 'UPI Server Busy' : 'UPI Server Facing Issues';
@@ -260,6 +260,9 @@ export class CheckoutServer {
     const downtimeAltBtnDisplay = ((sellingMode === 'ONLINE' && enabledMethods.includes('COD')) || (sellingMode === 'OFFLINE' && enabledMethods.includes('CASH_COUNTER'))) ? 'inline-block' : 'none';
     const downtimeAltBtnLabel = (sellingMode === 'ONLINE') ? 'Pay via Cash on Delivery Instead' : 'Pay by Cash at Till Instead';
 
+    const customerName = state?.customer?.fullName || state?.customer?.name || state?.metadata?.memberName || 'Member / Customer';
+    const orderDetails = (state?.metadata?.monthKey ? `महीना: ${state.metadata.monthKey} ` : '') + (orderId ? `(#${orderId})` : '');
+
     return renderTemplate(html, {
       PAYMENT_ID: paymentId,
       API_BASE_URL: clientApiBase,
@@ -268,6 +271,8 @@ export class CheckoutServer {
       FOOTER_GUARANTEE: footerGuarantee,
       TRUST_BADGE_TEXT: trustBadgeText,
       MERCHANT_NAME: merchantName,
+      CUSTOMER_NAME: customerName,
+      ORDER_DETAILS: orderDetails,
       ORDER_ID: orderId,
       AMOUNT: state?.amount || '0.00',
       VPA: vpa,

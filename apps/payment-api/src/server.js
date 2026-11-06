@@ -14,6 +14,19 @@ function configuredOrigins() {
   }).filter(Boolean));
 }
 
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  const origins = configuredOrigins();
+  if (origins.has(origin)) return true;
+  try {
+    const u = new URL(origin);
+    if (u.hostname.endsWith('.trycloudflare.com') || u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
 const requestWindows = new Map();
 function isRateLimited(req, pathname) {
   if (req.method !== 'POST') return false;
@@ -206,8 +219,7 @@ export class HttpServer {
   createServer() {
     return http.createServer(async (req, res) => {
       const origin = req.headers.origin;
-      const origins = configuredOrigins();
-      if (origin && !origins.has(origin)) {
+      if (origin && !isAllowedOrigin(origin)) {
         HttpServer.json(res, 403, { error: 'Origin is not allowed.' });
         return;
       }

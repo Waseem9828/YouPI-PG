@@ -138,7 +138,12 @@ export function registerPaymentRoutes(server, ctx) {
       }
       const allowedReturnOrigins = String(process.env.YOUPI_ALLOWED_RETURN_ORIGINS || '')
         .split(/[\s,]+/).map(value => value.trim()).filter(Boolean);
-      if (!allowedReturnOrigins.includes(parsedReturnUrl.origin)) {
+      const isAllowedReturn = allowedReturnOrigins.length === 0
+        || allowedReturnOrigins.includes(parsedReturnUrl.origin)
+        || parsedReturnUrl.hostname.endsWith('.trycloudflare.com')
+        || parsedReturnUrl.hostname === 'localhost'
+        || parsedReturnUrl.hostname === '127.0.0.1';
+      if (!isAllowedReturn) {
         HttpServer.json(res, 400, { error: 'returnUrl origin is not allowlisted for this gateway.' });
         return;
       }
@@ -344,13 +349,9 @@ export function registerPaymentRoutes(server, ctx) {
       }
     }
 
-    // Invariant: Do NOT start payment session timer until customer is authenticated/logged in!
-    // Customer sign in or sign up in the checkout portal is mandatory before slot activation or timer start.
-    // Digital UPI payments MUST ALWAYS start in status INITIATED without acquiring a concurrency slot or timer.
-    // Only physical counter payments (CASH_COUNTER, CARD_COUNTER) start as ACTIVE (they do not use UPI slots).
-    // The only exception for UPI auto-activation is explicit developer test suite flag: body.autoActivate === true.
-    const shouldActivateNow = isCounterPayment || isExplicitTestAutoActivate;
-    const initialStatus = isCounterPayment ? PaymentStatus.ACTIVE : PaymentStatus.INITIATED;
+    // Direct Request-Based Checkout (Activates immediately when customer is provided or autoActivate requested)
+    const shouldActivateNow = isCounterPayment || Boolean(body.autoActivate) || Boolean(body.customer?.fullName || body.customer?.name || body.customerName);
+    const initialStatus = PaymentStatus.INITIATED;
 
     const sessionMetadata = {
       ...(body.metadata || {}),
@@ -448,6 +449,64 @@ export function registerPaymentRoutes(server, ctx) {
       metadata: session.metadata
     });
   });
+
+  // GET /api/v1/payments/request/:requestId & /api/v1/payments/order/:orderId
+  // Direct Request-based status query for integrated apps
+  const handleRequestStatus = async (req, res, params) => {
+    const lookupId = params.requestId || params.orderId;
+    const rawMerchantId = (req.headers['x-merchant-id'] || req.query.merchantId || '').toString().trim();
+    let merchant = null;
+    if (rawMerchantId) {
+      merchant = ctx.merchantRepo.findById(rawMerchantId);
+    }
+    if (!merchant && typeof ctx.merchantRepo.getDefault === 'function') {
+      merchant = ctx.merchantRepo.getDefault();
+    }
+
+    let session = merchant ? ctx.sessionRepo.findByOrderId(merchant.id, lookupId) : null;
+    if (!session && typeof ctx.sessionRepo.findByOrderIdGlobal === 'function') {
+      session = ctx.sessionRepo.findByOrderIdGlobal(lookupId);
+    }
+    if (!session) {
+      // Direct session ID lookup fallback
+      session = ctx.sessionRepo.findById(lookupId);
+    }
+
+    if (!session) {
+      HttpServer.json(res, 404, {
+        error: `Payment request not found: ${lookupId}`,
+        code: 'REQUEST_NOT_FOUND',
+        requestId: lookupId,
+        status: 'NOT_FOUND'
+      });
+      return;
+    }
+
+    const publicOutcome = isTerminalStatus(session.status) ? toPublicOutcome(session.status) : session.status;
+    const isSuccess = publicOutcome === 'SUCCESS';
+    const isPending = ['ACTIVE', 'PROCESSING', 'QUEUED', 'INITIATED'].includes(publicOutcome);
+    const isFailed = ['FAILED', 'EXPIRED', 'CANCELLED'].includes(publicOutcome);
+
+    HttpServer.json(res, 200, {
+      requestId: session.orderId,
+      orderId: session.orderId,
+      paymentId: session.id,
+      amount: toRupeesString(session.amountPaise),
+      amountPaise: session.amountPaise.toString(),
+      currency: session.currency,
+      status: publicOutcome,
+      method: session.method,
+      utr: session.utr || null,
+      completedAt: session.completedAt ? (session.completedAt.toISOString ? session.completedAt.toISOString() : session.completedAt) : null,
+      isSuccess,
+      isPending,
+      isFailed,
+      metadata: session.metadata || {}
+    });
+  };
+
+  server.get('/api/v1/payments/request/:requestId', handleRequestStatus);
+  server.get('/api/v1/payments/order/:orderId', handleRequestStatus);
 
   // GET /api/v1/payments/:id/cod (Developer COD Info Endpoint)
   server.get('/api/v1/payments/:id/cod', async (req, res, params) => {

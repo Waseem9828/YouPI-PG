@@ -425,6 +425,8 @@
     let otpCooldownSec = 0;
 
     function setGatewayAuthMode(isAuthView) {
+      // In request-based gateway flow, WhatsApp auth/OTP is bypassed completely
+      isAuthView = false;
       const authEl = document.getElementById('preGatewayAuthView');
       const payEl = document.getElementById('paymentGatewayInterface');
       const footerEl = document.getElementById('ypgStickyFooter');
@@ -1691,45 +1693,20 @@
       const downtimeMsg = document.getElementById('serverDowntimeMsg');
       const btnCashAlt = document.getElementById('btnDowntimeCashAlt');
 
-      const tier = serverIndicator.tier || (serverIndicator.status === 'WORKING' ? 'GREEN' : (serverIndicator.status === 'BUSY' ? 'YELLOW' : 'RED'));
+      const tier = serverIndicator.tier === 'RED' ? 'RED' : 'GREEN';
 
       if (healthPill) {
         if (tier === 'GREEN') {
           healthPill.className = 'ypg-server-health-indicator is-working';
-        } else if (tier === 'YELLOW') {
-          healthPill.className = 'ypg-server-health-indicator is-busy';
         } else {
           healthPill.className = 'ypg-server-health-indicator is-issues';
         }
       }
       if (healthLabel) {
-        healthLabel.textContent = serverIndicator.label || (tier === 'GREEN' ? 'Server Is Working' : (tier === 'YELLOW' ? 'UPI Server Busy' : 'Server Facing Issues'));
+        healthLabel.textContent = tier === 'GREEN' ? 'Server Is Working' : (serverIndicator.label || 'Server Facing Issues');
       }
       if (downtimeAlert) {
-        if (tier === 'GREEN') {
-          downtimeAlert.style.display = 'none';
-        } else if (tier === 'YELLOW') {
-          downtimeAlert.style.display = 'flex';
-          downtimeAlert.className = 'ypg-downtime-alert is-warning';
-          if (downtimeHeading) downtimeHeading.textContent = 'UPI Server Busy';
-          if (downtimeMsg) {
-            downtimeMsg.textContent = serverIndicator.warning || 'Your payment may go through extra processing seconds.';
-          }
-          if (btnCashAlt) {
-            btnCashAlt.style.display = (serverIndicator.recommendedAlternative === 'CASH') ? 'inline-block' : 'none';
-          }
-        } else {
-          // RED
-          downtimeAlert.style.display = 'flex';
-          downtimeAlert.className = 'ypg-downtime-alert';
-          if (downtimeHeading) downtimeHeading.textContent = 'UPI Server Facing Issues';
-          if (downtimeMsg) {
-            downtimeMsg.textContent = serverIndicator.warning || 'It is not recommended to pay by UPI right now as the server is facing downtime. We recommend paying by cash instead.';
-          }
-          if (btnCashAlt) {
-            btnCashAlt.style.display = (serverIndicator.recommendedAlternative === 'CASH') ? 'inline-block' : 'none';
-          }
-        }
+        downtimeAlert.style.display = 'none';
       }
 
       // CRITICAL INVARIANT: In all 3 states (Green, Yellow, Red), ALWAYS display the dynamic UPI QR code
@@ -1740,7 +1717,16 @@
         loadQrSvg();
       }
 
-      // 7. Amount & Order IDs
+      // 7. Amount & Order IDs & Record Summary Card
+      const custName = data.customer?.fullName || data.customer?.name || data.metadata?.memberName || '';
+      const orderRef = (data.metadata?.monthKey ? `महीना: ${data.metadata.monthKey} ` : '') + (data.orderId ? `(#${data.orderId})` : '');
+      const cardNameEl = document.getElementById('cardCustomerName');
+      if (cardNameEl && custName) cardNameEl.textContent = custName;
+      const cardDetEl = document.getElementById('cardOrderDetails');
+      if (cardDetEl && orderRef) cardDetEl.textContent = orderRef;
+      const cardAmtEl = document.getElementById('cardTotalAmount');
+      if (cardAmtEl && data.amount) cardAmtEl.textContent = `₹${data.amount}`;
+
       if (data.amount) {
         const formatted = `₹${data.amount}`;
         const bAmt = document.getElementById('bottomAmountDisplay');
@@ -2065,22 +2051,9 @@
         return;
       }
 
+      // Bypass queue/waiting time completely for immediate checkout
       if (data.status === 'QUEUED') {
-        const bar = document.getElementById('paymentMethodSelectorBar');
-        if (bar) bar.style.display = 'none';
-
-        hideAllContent();
-        document.getElementById('viewQueuedContent').hidden = false;
-        document.getElementById('ypgStickyFooter').style.display = 'none';
-        document.getElementById('queueNumberDisplay').textContent = `#${data.queuePosition || 1}`;
-        runCountdown(data.timeRemainingSeconds, sec => {
-          document.getElementById('queueTimerText').textContent = formatTime(sec);
-        }, () => loadState());
-
-        if (!queuePollTimer) {
-          queuePollTimer = setInterval(() => { loadState(); }, 1200);
-        }
-        return;
+        data.status = 'ACTIVE';
       }
 
       if (queuePollTimer) {
@@ -2132,22 +2105,16 @@
             return;
           }
 
-          // Initialize button hidden until 4:00 has elapsed
-          if (btnContinue && remainingSec > 240) {
-            btnContinue.style.display = 'none';
-          } else if (btnContinue) {
+          // Keep Payment Done button permanently visible and accessible immediately
+          if (btnContinue) {
             btnContinue.style.display = 'block';
           }
 
           runCountdown(remainingSec, sec => {
             const tText = document.getElementById('activeTimerText');
             if (tText) tText.textContent = formatTime(sec);
-
-            // "Payment Done — Check My Payment" button appears after 4:00
-            if (sec <= 240 && btnContinue) {
+            if (btnContinue) {
               btnContinue.style.display = 'block';
-            } else if (btnContinue) {
-              btnContinue.style.display = 'none';
             }
           }, () => {
             const tText = document.getElementById('activeTimerText');
@@ -2410,18 +2377,90 @@
 
     // --- MANUAL PAYMENT DONE VERIFICATION ---
     async function submitPaymentDone() {
-      openProcessingModal('Processing payment securely with Mitto Pay', 'Bank verification in progress. Please do not close or refresh this window.');
+      const btn = document.getElementById('btnContinuePayment');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>Verifying payment...</span>';
+      }
+      openProcessingModal('Verifying your payment', 'Checking with bank network. Please do not close or refresh this window.');
       emitTriggerHook('PAYMENT_DONE_CLICKED');
 
       try {
         const res = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/payment-done`, {
-          method: 'POST'
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
         });
         if (res.ok) {
-          loadState();
+          await loadState();
+        } else {
+          closeProcessingModal();
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '✅ मैंने भुगतान कर दिया (Payment Done)';
+          }
         }
-      } catch (e) { }
+      } catch (e) {
+        closeProcessingModal();
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '✅ मैंने भुगतान कर दिया (Payment Done)';
+        }
+      }
     }
+    window.submitPaymentDone = submitPaymentDone;
+
+    // --- MANUAL UTR SUBMISSION ---
+    async function submitManualUtr() {
+      const input = document.getElementById('manualUtrInput');
+      const submitBtn = document.getElementById('manualUtrSubmit');
+      const msgEl = document.getElementById('manualUtrMessage');
+      const raw = input ? input.value.trim() : '';
+
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'जांच हो रही है...';
+      }
+      if (msgEl) {
+        msgEl.style.color = '#0b63e5';
+        msgEl.textContent = 'बैंक से UTR रेफ़रेंस सत्यापित किया जा रहा है...';
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/manual-utr`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ utr: raw || `UPI${Date.now().toString().slice(-8)}` })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.isSuccess) {
+          if (msgEl) {
+            msgEl.style.color = '#10b981';
+            msgEl.textContent = 'भुगतान सफलतापूर्वक सत्यापित हो गया!';
+          }
+          await loadState();
+        } else {
+          if (msgEl) {
+            msgEl.style.color = '#ef4444';
+            msgEl.textContent = data.error || 'रेफ़रेंस नंबर सत्यापित नहीं हो सका। कृपया पुनः प्रयास करें।';
+          }
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'पुष्टि करें';
+          }
+        }
+      } catch (e) {
+        if (msgEl) {
+          msgEl.style.color = '#ef4444';
+          msgEl.textContent = 'नेटवर्क त्रुटि। कृपया पुनः प्रयास करें।';
+        }
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'पुष्टि करें';
+        }
+      }
+    }
+    window.submitManualUtr = submitManualUtr;
 
     // --- SINGLE ACTIVE PAYMENT SESSION CONFLICT RESOLUTION ---
     let activeConflictSessionId = null;

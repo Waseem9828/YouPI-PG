@@ -248,12 +248,43 @@ This section is a practical project warning, not a certification, compliance che
 ### Prerequisites
 
 - **Node.js `>= 22.13.0` LTS** (Recommended: Node 24 LTS, `node -v`) for native `node:sqlite` (`DatabaseSync`) engine.
-  `node:sqlite` was added in Node 22.5.0 but only unflagged in **22.13.0**, so 22.5.0–22.12.x cannot run this project without `--experimental-sqlite`.
 - Standard Linux, macOS, or Windows host
 - _External database services (PostgreSQL/Redis) are completely optional!_
 
-> **Note:** Containerisation is not included in this repository yet — there is no `Dockerfile` or
-> `docker-compose.yml`. Run the services on a native Node.js host as described below.
+---
+
+## ☁️ 24/7 Cloud Deployment (PC-Independent Live Hosting)
+
+> **Complete Step-by-Step Guide:** [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md)
+
+To run YOUPI PG **completely online 24/7 without needing your local computer turned on**, deploy to any cloud server or PaaS:
+
+### 1. Ubuntu VPS with PM2 (Hostinger, DigitalOcean, Hetzner, AWS)
+```bash
+# 1. Clone & install
+git clone https://github.com/Waseem9828/YouPI-PG.git youpi-pg
+cd youpi-pg && npm install
+
+# 2. Start with PM2 (runs in background permanently)
+npm install -g pm2
+pm2 start ecosystem.config.cjs
+pm2 save && pm2 startup
+```
+
+### 2. Docker Compose (1-Command Cloud Setup)
+```bash
+docker compose up -d
+```
+
+### 3. One Gateway for Multiple Websites & Apps (Multi-Tenant)
+YOUPI PG is built to serve **unlimited independent apps and websites** simultaneously from a single deployed instance:
+- **App 1 (Mosque / Community App):** Uses Merchant Key `mk_live_imam_...` with webhook `https://imam.yourdomain.com/api/webhook/youpi`
+- **App 2 (eCommerce Store):** Uses Merchant Key `mk_live_store_...` with webhook `https://store.yourdomain.com/api/webhook/youpi`
+- **App 3 (Donation / SaaS Portal):** Uses Merchant Key `mk_live_saas_...` with webhook `https://app.yourdomain.com/api/webhook/youpi`
+
+All apps share the same zero-fee gateway while maintaining strict cryptographic isolation, separate webhook endpoints, and dedicated transaction history.
+
+---
 
 ### Native Host Quickstart
 

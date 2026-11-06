@@ -1,3 +1,7 @@
+# Temporary and Development Executables
+cloudflared.exe
+.vscode/
+
 # Dependencies
 node_modules/
 .pnp
