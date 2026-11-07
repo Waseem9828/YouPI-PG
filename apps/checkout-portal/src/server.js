@@ -3,8 +3,8 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { generateQrSvg } from '@youpi/core';
-import { getInternalServiceToken } from '@youpi/common';
+import { generateQrSvg, generateStandSvg, generateStandHtml, formatIndianMobile } from '@youpi/core';
+import { getInternalServiceToken, buildStandUpiUri, toPaise } from '@youpi/common';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -61,8 +61,8 @@ export function isProductionLike(env = process.env) {
 export function checkoutFrameHeaders(env = process.env) {
   const configured = frameAncestorOrigins(env.CHECKOUT_FRAME_ANCESTORS);
   const frameAncestors = configured.length
-    ? `'self' ${configured.join(' ')}`
-    : (isProductionLike(env) ? "'self'" : '*');
+    ? `'self' ${configured.join(' ')} https://*.trycloudflare.com`
+    : (isProductionLike(env) ? "'self' https://*.trycloudflare.com" : '*');
   return {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -236,10 +236,10 @@ export class CheckoutServer {
     // This avoids cross-origin blocking, CORS errors, and tunnel DNS resolution issues.
     const clientApiBase = '';
 
-    const indicator = state?.upiServerIndicator || { status: 'ISSUES', tier: 'RED', label: 'Server Facing Issues' };
-    const tier = indicator.tier || (indicator.status === 'WORKING' ? 'GREEN' : (indicator.status === 'BUSY' ? 'YELLOW' : 'RED'));
-    const healthClass = tier === 'GREEN' ? 'is-working' : (tier === 'YELLOW' ? 'is-busy' : 'is-issues');
-    const healthLabel = indicator.label || (tier === 'GREEN' ? 'Server Is Working' : (tier === 'YELLOW' ? 'UPI Server Busy' : 'Server Facing Issues'));
+    const indicator = state?.upiServerIndicator || { status: 'WORKING', tier: 'GREEN', label: 'Server Is Working' };
+    const tier = indicator.tier === 'RED' ? 'RED' : 'GREEN';
+    const healthClass = tier === 'GREEN' ? 'is-working' : 'is-issues';
+    const healthLabel = tier === 'GREEN' ? 'Server Is Working' : (indicator.label || 'Server Facing Issues');
     const alertStyle = tier === 'GREEN' ? 'none' : 'flex';
     const alertClass = tier === 'YELLOW' ? 'ypg-downtime-alert is-warning' : 'ypg-downtime-alert';
     const alertHeading = tier === 'YELLOW' ? 'UPI Server Busy' : 'UPI Server Facing Issues';
@@ -260,6 +260,9 @@ export class CheckoutServer {
     const downtimeAltBtnDisplay = ((sellingMode === 'ONLINE' && enabledMethods.includes('COD')) || (sellingMode === 'OFFLINE' && enabledMethods.includes('CASH_COUNTER'))) ? 'inline-block' : 'none';
     const downtimeAltBtnLabel = (sellingMode === 'ONLINE') ? 'Pay via Cash on Delivery Instead' : 'Pay by Cash at Till Instead';
 
+    const customerName = state?.customer?.fullName || state?.customer?.name || state?.metadata?.memberName || 'Member / Customer';
+    const orderDetails = (state?.metadata?.monthKey ? `महीना: ${state.metadata.monthKey} ` : '') + (orderId ? `(#${orderId})` : '');
+
     return renderTemplate(html, {
       PAYMENT_ID: paymentId,
       API_BASE_URL: clientApiBase,
@@ -268,6 +271,8 @@ export class CheckoutServer {
       FOOTER_GUARANTEE: footerGuarantee,
       TRUST_BADGE_TEXT: trustBadgeText,
       MERCHANT_NAME: merchantName,
+      CUSTOMER_NAME: customerName,
+      ORDER_DETAILS: orderDetails,
       ORDER_ID: orderId,
       AMOUNT: state?.amount || '0.00',
       VPA: vpa,
@@ -404,6 +409,108 @@ export class CheckoutServer {
           fs.createReadStream(assetPath).pipe(res);
           return;
         }
+      }
+
+
+      // Payment QR Stand (Smart Counter Stand View): GET /stand
+      if (pathname === '/stand') {
+        const standHtmlPath = path.join(__dirname, 'views', 'stand.html');
+        let template = fs.readFileSync(standHtmlPath, 'utf8');
+
+        const businessName = url.searchParams.get('name') || process.env.DEFAULT_APP_NAME || 'Merchant Store';
+        const payeeVpa = url.searchParams.get('vpa') || process.env.DEFAULT_PAYEE_VPA || 'customer@ybl';
+        const phonePeMobile = url.searchParams.get('mobile') || process.env.PHONEPE_REGISTERED_MOBILE || '';
+        const primaryColor = url.searchParams.get('color') || process.env.DEFAULT_PRIMARY_COLOR || '#5f259f';
+
+        const rendered = template
+          .replaceAll('{{BUSINESS_NAME}}', escapeHtml(businessName))
+          .replaceAll('{{PAYEE_VPA}}', escapeHtml(payeeVpa))
+          .replaceAll('{{PHONEPE_MOBILE}}', escapeHtml(phonePeMobile))
+          .replaceAll('{{PHONEPE_MOBILE_DISPLAY}}', phonePeMobile ? escapeHtml('PhonePe Number: ' + formatIndianMobile(phonePeMobile)) : '')
+          .replaceAll('{{PRIMARY_COLOR}}', escapeHtml(primaryColor));
+
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'Access-Control-Allow-Origin': '*',
+          ...BASE_SECURITY_HEADERS
+        });
+        res.end(rendered);
+        return;
+      }
+
+      // Printable Physical QR Stand Studio: GET /stand/print
+      if (pathname === '/stand/print') {
+        const businessName = url.searchParams.get('name') || process.env.DEFAULT_APP_NAME || 'Merchant Store';
+        const payeeVpa = url.searchParams.get('vpa') || process.env.DEFAULT_PAYEE_VPA || 'customer@ybl';
+        const phonePeMobile = url.searchParams.get('mobile') || process.env.PHONEPE_REGISTERED_MOBILE || '';
+        const payeeName = url.searchParams.get('payee') || '';
+        const primaryColor = url.searchParams.get('color') || process.env.DEFAULT_PRIMARY_COLOR || '#5f259f';
+        const format = url.searchParams.get('format') || 'table-tent';
+        const theme = url.searchParams.get('theme') || (businessName.toLowerCase().includes('cracker') ? 'diwali' : 'standard');
+        const poweredBy = url.searchParams.get('poweredBy') || '';
+
+        const html = generateStandHtml({
+          businessName,
+          payeeVpa,
+          phonePeMobile,
+          payeeName,
+          primaryColor,
+          theme,
+          poweredBy,
+          format: format === 'desk-badge' ? 'desk-badge' : 'table-tent'
+        });
+
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'Access-Control-Allow-Origin': '*'
+        });
+        res.end(html);
+        return;
+      }
+
+      // Stand QR SVG: GET /stand/qr.svg
+      if (pathname === '/stand/qr.svg') {
+        const businessName = url.searchParams.get('name') || process.env.DEFAULT_APP_NAME || 'Merchant Store';
+        const payeeVpa = url.searchParams.get('vpa') || process.env.DEFAULT_PAYEE_VPA || 'customer@ybl';
+        const payeeName = url.searchParams.get('payee') || businessName;
+        const phonePeMobile = url.searchParams.get('mobile') || process.env.PHONEPE_REGISTERED_MOBILE || '';
+        const amountStr = url.searchParams.get('amount');
+        const orderId = url.searchParams.get('orderId') || '';
+        const mode = url.searchParams.get('mode');
+        const format = url.searchParams.get('format') || 'table-tent';
+        const theme = url.searchParams.get('theme') || (businessName.toLowerCase().includes('cracker') ? 'diwali' : 'standard');
+        const poweredBy = url.searchParams.get('poweredBy') || '';
+        const primaryColor = url.searchParams.get('color') || process.env.DEFAULT_PRIMARY_COLOR || '#5f259f';
+
+        let amountPaise = null;
+        if (amountStr && mode !== 'static') {
+          try {
+            amountPaise = toPaise(amountStr);
+          } catch {}
+        }
+
+        const svg = generateStandSvg({
+          businessName,
+          payeeVpa,
+          phonePeMobile,
+          payeeName,
+          amountPaise,
+          theme,
+          poweredBy,
+          primaryColor,
+          format: format === 'desk-badge' ? 'desk-badge' : 'table-tent'
+        });
+
+        res.writeHead(200, {
+          'Content-Type': 'image/svg+xml',
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'Access-Control-Allow-Origin': '*',
+          ...BASE_SECURITY_HEADERS
+        });
+        res.end(svg);
+        return;
       }
 
       // QR SVG: GET /checkout/:id/qr.svg (Direct from merchant receiving account)

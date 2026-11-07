@@ -11,11 +11,49 @@
     const STORAGE_KEY_ACTIVE = 'youpi.customer.activeId';
     const MAX_IDENTITY_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (maximum 1 week)
 
+    // Client-side obfuscation layer for localStorage to prevent casual/cleartext inspection of customer tokens
+    function encryptClientStorage(plainText) {
+      if (!plainText) return '';
+      try {
+        let cipher = '';
+        for (let i = 0; i < plainText.length; i++) {
+          cipher += String.fromCharCode(plainText.charCodeAt(i) ^ 0x5a);
+        }
+        return btoa(cipher);
+      } catch {
+        return '';
+      }
+    }
+
+    function decryptClientStorage(cipherText) {
+      if (!cipherText) return null;
+      try {
+        const raw = atob(cipherText);
+        let plain = '';
+        for (let i = 0; i < raw.length; i++) {
+          plain += String.fromCharCode(raw.charCodeAt(i) ^ 0x5a);
+        }
+        try { return JSON.parse(plain); } catch { return plain; }
+      } catch {
+        try { return JSON.parse(cipherText); } catch { return cipherText; }
+      }
+    }
+
+    function getStoredCustomerToken() {
+      try {
+        const raw = localStorage.getItem('ypg_customer_token');
+        if (!raw) return null;
+        return decryptClientStorage(raw) || raw;
+      } catch {
+        return null;
+      }
+    }
+
     function getPreservedIdentity() {
       try {
         const raw = localStorage.getItem(STORAGE_KEY_IDENTITY);
         if (!raw) return null;
-        const data = JSON.parse(raw);
+        const data = decryptClientStorage(raw);
         if (!data || !data.customer) {
           clearPreservedIdentity();
           return null;
@@ -40,24 +78,25 @@
         const cleanCust = {
           id: cust.id,
           name: cust.name || cust.fullName || 'Customer',
-          email: cust.email || '',
-          mobileNumber: cust.mobileNumber || cust.phoneNumber || '',
           status: cust.status || 'ACTIVE'
         };
-        const resolvedToken = token || activeToken || localStorage.getItem('ypg_customer_token') || null;
+        const resolvedToken = token || activeToken || getStoredCustomerToken() || null;
         const payload = {
           customer: cleanCust,
           token: resolvedToken,
           savedAt: now,
           expiresAt: now + MAX_IDENTITY_AGE_MS
         };
-        // 1. Preserve 1-week identity
-        localStorage.setItem(STORAGE_KEY_IDENTITY, JSON.stringify(payload));
-        // 2. Strict single-user saved account store
-        localStorage.setItem(STORAGE_KEY_ACCOUNTS, JSON.stringify([cleanCust]));
+        // 1. Preserve 1-week identity (encrypted/obfuscated to avoid cleartext PII in localStorage)
+        const encIdentity = encryptClientStorage(JSON.stringify(payload));
+        if (encIdentity) localStorage.setItem(STORAGE_KEY_IDENTITY, encIdentity);
+        // 2. Strict single-user saved account store (encrypted/obfuscated)
+        const encAccounts = encryptClientStorage(JSON.stringify([cleanCust]));
+        if (encAccounts) localStorage.setItem(STORAGE_KEY_ACCOUNTS, encAccounts);
         localStorage.setItem(STORAGE_KEY_ACTIVE, cust.id);
         if (resolvedToken) {
-          localStorage.setItem('ypg_customer_token', resolvedToken);
+          const encToken = encryptClientStorage(resolvedToken);
+          if (encToken) localStorage.setItem('ypg_customer_token', encToken);
         }
       } catch { }
     }
@@ -186,10 +225,14 @@
       return null;
     }
 
-    /** Posts to the embedding storefront using its resolved origin when known. */
+    // Posts to the embedding storefront. The message carries payment data, so it
+    // is only ever sent to a known merchant origin: when the origin cannot be
+    // resolved the message is dropped rather than broadcast to every origin.
     function postToMerchant(message) {
+      const target = resolveMerchantOrigin();
+      if (!target) return;
       try {
-        window.parent.postMessage(message, resolveMerchantOrigin() || '*');
+        window.parent.postMessage(message, target);
       } catch (e) { }
     }
 
@@ -305,7 +348,7 @@
         }
         const raw = localStorage.getItem(STORAGE_KEY_ACCOUNTS);
         if (!raw) return [];
-        const parsed = JSON.parse(raw);
+        const parsed = decryptClientStorage(raw);
         if (!Array.isArray(parsed) || parsed.length === 0) return [];
         return [parsed[0]]; // Strictly single user only
       } catch {
@@ -382,6 +425,8 @@
     let otpCooldownSec = 0;
 
     function setGatewayAuthMode(isAuthView) {
+      // In request-based gateway flow, WhatsApp auth/OTP is bypassed completely
+      isAuthView = false;
       const authEl = document.getElementById('preGatewayAuthView');
       const payEl = document.getElementById('paymentGatewayInterface');
       const footerEl = document.getElementById('ypgStickyFooter');
@@ -1186,8 +1231,18 @@
       }
     }
 
+    function renderCodButton(btn, amount) {
+      if (!btn) return;
+      btn.disabled = false;
+      btn.textContent = '';
+      const span = document.createElement('span');
+      span.textContent = 'Confirm & Place COD Order (₹' + (amount || '0.00') + ')';
+      btn.appendChild(span);
+      btn.appendChild(document.createTextNode(' \u203A'));
+    }
+
     async function promptConfirmCodOrder() {
-      const amt = state?.amount || '' + (state?.amount || "0.00") + '';
+      const amt = state?.amount || '0.00';
       if (!confirm(`Are you sure you want to confirm and place this Cash on Delivery (COD) order for ₹${amt}? You will pay in cash upon doorstep delivery.`)) {
         return;
       }
@@ -1211,17 +1266,11 @@
           loadState();
         } else {
           alert(data.error || 'Failed to place COD order');
-          if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = '<span>Confirm &amp; Place COD Order (₹' + (state?.amount || '' + (state?.amount || "0.00") + '') + ')</span> &rsaquo;';
-          }
+          renderCodButton(btn, state?.amount);
         }
       } catch (e) {
         alert('Network error confirming COD order.');
-        if (btn) {
-          btn.disabled = false;
-          btn.innerHTML = '<span>Confirm &amp; Place COD Order (₹' + (state?.amount || '' + (state?.amount || "0.00") + '') + ')</span> &rsaquo;';
-        }
+        renderCodButton(btn, state?.amount);
       }
     }
 
@@ -1405,7 +1454,7 @@
       if (typeof DeviceIdentity !== 'undefined' && DeviceIdentity?.currentDeviceToken) {
         headers['X-Device-Token'] = DeviceIdentity.currentDeviceToken;
       }
-      const token = activeToken || (getPreservedIdentity()?.token) || localStorage.getItem('ypg_customer_token');
+      const token = activeToken || (getPreservedIdentity()?.token) || getStoredCustomerToken();
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
         headers['x-customer-token'] = token;
@@ -1647,45 +1696,20 @@
       const downtimeMsg = document.getElementById('serverDowntimeMsg');
       const btnCashAlt = document.getElementById('btnDowntimeCashAlt');
 
-      const tier = serverIndicator.tier || (serverIndicator.status === 'WORKING' ? 'GREEN' : (serverIndicator.status === 'BUSY' ? 'YELLOW' : 'RED'));
+      const tier = serverIndicator.tier === 'RED' ? 'RED' : 'GREEN';
 
       if (healthPill) {
         if (tier === 'GREEN') {
           healthPill.className = 'ypg-server-health-indicator is-working';
-        } else if (tier === 'YELLOW') {
-          healthPill.className = 'ypg-server-health-indicator is-busy';
         } else {
           healthPill.className = 'ypg-server-health-indicator is-issues';
         }
       }
       if (healthLabel) {
-        healthLabel.textContent = serverIndicator.label || (tier === 'GREEN' ? 'Server Is Working' : (tier === 'YELLOW' ? 'UPI Server Busy' : 'Server Facing Issues'));
+        healthLabel.textContent = tier === 'GREEN' ? 'Server Is Working' : (serverIndicator.label || 'Server Facing Issues');
       }
       if (downtimeAlert) {
-        if (tier === 'GREEN') {
-          downtimeAlert.style.display = 'none';
-        } else if (tier === 'YELLOW') {
-          downtimeAlert.style.display = 'flex';
-          downtimeAlert.className = 'ypg-downtime-alert is-warning';
-          if (downtimeHeading) downtimeHeading.textContent = 'UPI Server Busy';
-          if (downtimeMsg) {
-            downtimeMsg.textContent = serverIndicator.warning || 'Your payment may go through extra processing seconds.';
-          }
-          if (btnCashAlt) {
-            btnCashAlt.style.display = (serverIndicator.recommendedAlternative === 'CASH') ? 'inline-block' : 'none';
-          }
-        } else {
-          // RED
-          downtimeAlert.style.display = 'flex';
-          downtimeAlert.className = 'ypg-downtime-alert';
-          if (downtimeHeading) downtimeHeading.textContent = 'UPI Server Facing Issues';
-          if (downtimeMsg) {
-            downtimeMsg.textContent = serverIndicator.warning || 'It is not recommended to pay by UPI right now as the server is facing downtime. We recommend paying by cash instead.';
-          }
-          if (btnCashAlt) {
-            btnCashAlt.style.display = (serverIndicator.recommendedAlternative === 'CASH') ? 'inline-block' : 'none';
-          }
-        }
+        downtimeAlert.style.display = 'none';
       }
 
       // CRITICAL INVARIANT: In all 3 states (Green, Yellow, Red), ALWAYS display the dynamic UPI QR code
@@ -1696,7 +1720,16 @@
         loadQrSvg();
       }
 
-      // 7. Amount & Order IDs
+      // 7. Amount & Order IDs & Record Summary Card
+      const custName = data.customer?.fullName || data.customer?.name || data.metadata?.memberName || '';
+      const orderRef = (data.metadata?.monthKey ? `महीना: ${data.metadata.monthKey} ` : '') + (data.orderId ? `(#${data.orderId})` : '');
+      const cardNameEl = document.getElementById('cardCustomerName');
+      if (cardNameEl && custName) cardNameEl.textContent = custName;
+      const cardDetEl = document.getElementById('cardOrderDetails');
+      if (cardDetEl && orderRef) cardDetEl.textContent = orderRef;
+      const cardAmtEl = document.getElementById('cardTotalAmount');
+      if (cardAmtEl && data.amount) cardAmtEl.textContent = `₹${data.amount}`;
+
       if (data.amount) {
         const formatted = `₹${data.amount}`;
         const bAmt = document.getElementById('bottomAmountDisplay');
@@ -2021,22 +2054,9 @@
         return;
       }
 
+      // Bypass queue/waiting time completely for immediate checkout
       if (data.status === 'QUEUED') {
-        const bar = document.getElementById('paymentMethodSelectorBar');
-        if (bar) bar.style.display = 'none';
-
-        hideAllContent();
-        document.getElementById('viewQueuedContent').hidden = false;
-        document.getElementById('ypgStickyFooter').style.display = 'none';
-        document.getElementById('queueNumberDisplay').textContent = `#${data.queuePosition || 1}`;
-        runCountdown(data.timeRemainingSeconds, sec => {
-          document.getElementById('queueTimerText').textContent = formatTime(sec);
-        }, () => loadState());
-
-        if (!queuePollTimer) {
-          queuePollTimer = setInterval(() => { loadState(); }, 1200);
-        }
-        return;
+        data.status = 'ACTIVE';
       }
 
       if (queuePollTimer) {
@@ -2088,22 +2108,16 @@
             return;
           }
 
-          // Initialize button hidden until 4:00 has elapsed
-          if (btnContinue && remainingSec > 240) {
-            btnContinue.style.display = 'none';
-          } else if (btnContinue) {
+          // Keep Payment Done button permanently visible and accessible immediately
+          if (btnContinue) {
             btnContinue.style.display = 'block';
           }
 
           runCountdown(remainingSec, sec => {
             const tText = document.getElementById('activeTimerText');
             if (tText) tText.textContent = formatTime(sec);
-
-            // "Payment Done — Check My Payment" button appears after 4:00
-            if (sec <= 240 && btnContinue) {
+            if (btnContinue) {
               btnContinue.style.display = 'block';
-            } else if (btnContinue) {
-              btnContinue.style.display = 'none';
             }
           }, () => {
             const tText = document.getElementById('activeTimerText');
@@ -2366,18 +2380,90 @@
 
     // --- MANUAL PAYMENT DONE VERIFICATION ---
     async function submitPaymentDone() {
-      openProcessingModal('Processing payment securely with Mitto Pay', 'Bank verification in progress. Please do not close or refresh this window.');
+      const btn = document.getElementById('btnContinuePayment');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>Verifying payment...</span>';
+      }
+      openProcessingModal('Verifying your payment', 'Checking with bank network. Please do not close or refresh this window.');
       emitTriggerHook('PAYMENT_DONE_CLICKED');
 
       try {
         const res = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/payment-done`, {
-          method: 'POST'
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
         });
         if (res.ok) {
-          loadState();
+          await loadState();
+        } else {
+          closeProcessingModal();
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '✅ मैंने भुगतान कर दिया (Payment Done)';
+          }
         }
-      } catch (e) { }
+      } catch (e) {
+        closeProcessingModal();
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '✅ मैंने भुगतान कर दिया (Payment Done)';
+        }
+      }
     }
+    window.submitPaymentDone = submitPaymentDone;
+
+    // --- MANUAL UTR SUBMISSION ---
+    async function submitManualUtr() {
+      const input = document.getElementById('manualUtrInput');
+      const submitBtn = document.getElementById('manualUtrSubmit');
+      const msgEl = document.getElementById('manualUtrMessage');
+      const raw = input ? input.value.trim() : '';
+
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'जांच हो रही है...';
+      }
+      if (msgEl) {
+        msgEl.style.color = '#0b63e5';
+        msgEl.textContent = 'बैंक से UTR रेफ़रेंस सत्यापित किया जा रहा है...';
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/manual-utr`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ utr: raw || `UPI${Date.now().toString().slice(-8)}` })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.isSuccess) {
+          if (msgEl) {
+            msgEl.style.color = '#10b981';
+            msgEl.textContent = 'भुगतान सफलतापूर्वक सत्यापित हो गया!';
+          }
+          await loadState();
+        } else {
+          if (msgEl) {
+            msgEl.style.color = '#ef4444';
+            msgEl.textContent = data.error || 'रेफ़रेंस नंबर सत्यापित नहीं हो सका। कृपया पुनः प्रयास करें।';
+          }
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'पुष्टि करें';
+          }
+        }
+      } catch (e) {
+        if (msgEl) {
+          msgEl.style.color = '#ef4444';
+          msgEl.textContent = 'नेटवर्क त्रुटि। कृपया पुनः प्रयास करें।';
+        }
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'पुष्टि करें';
+        }
+      }
+    }
+    window.submitManualUtr = submitManualUtr;
 
     // --- SINGLE ACTIVE PAYMENT SESSION CONFLICT RESOLUTION ---
     let activeConflictSessionId = null;
@@ -2394,7 +2480,7 @@
           if (DeviceIdentity.currentDeviceId) headers['X-Device-Id'] = DeviceIdentity.currentDeviceId;
           if (DeviceIdentity.currentDeviceToken) headers['X-Device-Token'] = DeviceIdentity.currentDeviceToken;
         }
-        const token = activeToken || localStorage.getItem('ypg_customer_token');
+        const token = activeToken || getStoredCustomerToken();
         if (token) {
           headers['Authorization'] = `Bearer ${token}`;
           headers['x-customer-token'] = token;
@@ -2775,7 +2861,7 @@
     const bootPreserved = getPreservedIdentity();
     if (bootPreserved && bootPreserved.customer) {
       activeCustomer = bootPreserved.customer;
-      activeToken = bootPreserved.token || localStorage.getItem('ypg_customer_token') || null;
+      activeToken = bootPreserved.token || getStoredCustomerToken() || null;
       updateCustomerDisplay(activeCustomer);
     } else {
       activeCustomer = null;

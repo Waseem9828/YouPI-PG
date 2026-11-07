@@ -142,8 +142,8 @@ flowchart LR
     AndroidNode -->|HMAC-SHA256 Signed Alert| DualTimer
     GmailNode -->|Normalized Amount & UTR| DualTimer
 
-    DualTimer -->|Confirmed SUCCESS| Buyer
-    DualTimer -->|Authoritative Server Webhook| Cart
+    DualTimer -->|OBSERVED_SUCCESS - not reconciled| Buyer
+    DualTimer -->|Signed observation webhook| Cart
 ```
 
 <br/>
@@ -248,12 +248,43 @@ This section is a practical project warning, not a certification, compliance che
 ### Prerequisites
 
 - **Node.js `>= 22.13.0` LTS** (Recommended: Node 24 LTS, `node -v`) for native `node:sqlite` (`DatabaseSync`) engine.
-  `node:sqlite` was added in Node 22.5.0 but only unflagged in **22.13.0**, so 22.5.0–22.12.x cannot run this project without `--experimental-sqlite`.
 - Standard Linux, macOS, or Windows host
 - _External database services (PostgreSQL/Redis) are completely optional!_
 
-> **Note:** Containerisation is not included in this repository yet — there is no `Dockerfile` or
-> `docker-compose.yml`. Run the services on a native Node.js host as described below.
+---
+
+## ☁️ 24/7 Cloud Deployment (PC-Independent Live Hosting)
+
+> **Complete Step-by-Step Guide:** [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md)
+
+To run YOUPI PG **completely online 24/7 without needing your local computer turned on**, deploy to any cloud server or PaaS:
+
+### 1. Ubuntu VPS with PM2 (Hostinger, DigitalOcean, Hetzner, AWS)
+```bash
+# 1. Clone & install
+git clone https://github.com/Waseem9828/YouPI-PG.git youpi-pg
+cd youpi-pg && npm install
+
+# 2. Start with PM2 (runs in background permanently)
+npm install -g pm2
+pm2 start ecosystem.config.cjs
+pm2 save && pm2 startup
+```
+
+### 2. Docker Compose (1-Command Cloud Setup)
+```bash
+docker compose up -d
+```
+
+### 3. One Gateway for Multiple Websites & Apps (Multi-Tenant)
+YOUPI PG is built to serve **unlimited independent apps and websites** simultaneously from a single deployed instance:
+- **App 1 (Mosque / Community App):** Uses Merchant Key `mk_live_imam_...` with webhook `https://imam.yourdomain.com/api/webhook/youpi`
+- **App 2 (eCommerce Store):** Uses Merchant Key `mk_live_store_...` with webhook `https://store.yourdomain.com/api/webhook/youpi`
+- **App 3 (Donation / SaaS Portal):** Uses Merchant Key `mk_live_saas_...` with webhook `https://app.yourdomain.com/api/webhook/youpi`
+
+All apps share the same zero-fee gateway while maintaining strict cryptographic isolation, separate webhook endpoints, and dedicated transaction history.
+
+---
 
 ### Native Host Quickstart
 
@@ -295,7 +326,7 @@ The services can then be accessed at the following local addresses:
 
 ### 4. Run the Full Regression Test Suite
 
-Verify all **31 test suites** across packages, apps, and chaos harnesses:
+Run the curated test suites across packages, apps, and chaos harnesses, including observed-payment handling, statement reconciliation, and durable webhook delivery:
 
 ```bash
 npm test
@@ -360,8 +391,8 @@ window.Youpi.pay({
   name: "Acme Digital Store",
   description: "Pro Subscription Top-Up",
   handler: function (response) {
-    // response: { status: 'SUCCESS', order_id, amount_received, utr }
-    console.log(`Payment confirmed! UTR: ${response.utr}`);
+    // Browser callbacks update the UI; they do not prove bank settlement.
+    console.log(`Checkout status: ${response.status}; UTR: ${response.utr}`);
     window.location.href = `/order-success?order_id=${response.order_id}&utr=${response.utr}`;
   },
   onClose: function () {
@@ -370,7 +401,22 @@ window.Youpi.pay({
 });
 ```
 
-### Step 4: Authoritative Server-to-Server Webhook Verification
+### Step 4: Signed Server-to-Server Webhook Verification
+
+UPI alerts produce `OBSERVED_SUCCESS` with `settlementState: "NOT_RECONCILED"`.
+They do not produce a bank-confirmed `SUCCESS`. Only a matching operator-imported
+bank statement produces `RECONCILED` with `settlementState: "RECONCILED"`.
+There is no bank API or automatic statement feed. An imported CSV is trusted
+operator input, not independently authenticated bank evidence.
+
+`SUCCESS` remains the COD and counter-payment outcome; COD means an order was
+placed, not that money was received. A valid HMAC authenticates the gateway
+message, not settlement. For UPI fulfillment, require `method: "UPI"`,
+`event: "RECONCILED"`, and `settlementState: "RECONCILED"`, then match the order,
+currency, expected amount, and reference against your records and process the
+delivery idempotently. The snippets below show signature and event filtering;
+they leave order validation and persistent deduplication to your application.
+See [Merchant Integration](docs/MERCHANT_INTEGRATION.md) for the full lifecycle.
 
 > **CRITICAL SECURITY RULE:** Never fulfill orders based solely on frontend browser events. Always verify the backend HMAC-SHA256 signature! Consumers **MUST** compute the HMAC over the raw, unparsed request bytes before any JSON parsing.
 
@@ -378,12 +424,13 @@ window.Youpi.pay({
 
 - **Header**: `X-Gateway-Signature: sha256=<64_char_hex_hash>` — `HMAC-SHA256(webhookSecret, rawRequestBody)`
 - **Additional Headers**:
-  - `X-Gateway-Event: SUCCESS`
+  - `X-Gateway-Event: OBSERVED_SUCCESS`, `RECONCILED`, or another lifecycle outcome
   - `X-Gateway-Delivery-Id: <uuid>` — stable across retries; use it to deduplicate
   - `X-Gateway-Timestamp: <timestamp_ms>` — the time the delivery was FIRST signed
   - `X-Gateway-Signature-V2: sha256=<64_char_hex_hash>` — `HMAC-SHA256(webhookSecret, "<timestamp_ms>.<rawRequestBody>")`, binds the timestamp into the signature
 - **Payload Fields**:
-  - `event`: `'SUCCESS'`
+  - `event`: lifecycle outcome, such as `'OBSERVED_SUCCESS'` or `'RECONCILED'`
+  - `settlementState`: `'NOT_RECONCILED'` for an alert; `'RECONCILED'` for a matched statement
   - `orderId`: Merchant order ID (string)
   - `amount`: Formatted amount in Rupees, e.g. `'499.00'`
   - `amountPaise`: Integer amount in Paise, e.g. `49900`
@@ -424,8 +471,8 @@ app.post(
     }
 
     const payload = JSON.parse(req.body.toString("utf8"));
-    if (payload.event === "SUCCESS") {
-      // Fulfill order: payload.orderId, payload.utr, payload.amount, payload.amountPaise
+    if (payload.event === "RECONCILED" && payload.method === "UPI" && payload.settlementState === "RECONCILED") {
+      // Validate order, currency, expected amount and UTR; deduplicate before fulfillment.
     }
     res.status(200).json({ received: true });
   },
@@ -451,8 +498,9 @@ async def youpi_webhook(request: Request):
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     payload = json.loads(raw_body.decode("utf-8"))
-    if payload.get("event") == "SUCCESS":
-        # Fulfill order: payload["orderId"], payload["utr"], payload["amount"]
+    if (payload.get("event") == "RECONCILED" and payload.get("method") == "UPI"
+            and payload.get("settlementState") == "RECONCILED"):
+        # Validate order, currency, expected amount and UTR; deduplicate before fulfillment.
         pass
     return {"received": True}
 ```
@@ -473,8 +521,9 @@ if (!hash_equals($expected, $signature)) {
 }
 
 $payload = json_decode($rawPayload, true);
-if (($payload['event'] ?? '') === 'SUCCESS') {
-    // Fulfill order: $payload['orderId'], $payload['utr'], $payload['amount']
+if (($payload['event'] ?? '') === 'RECONCILED' && ($payload['method'] ?? '') === 'UPI'
+    && ($payload['settlementState'] ?? '') === 'RECONCILED') {
+    // Validate order, currency, expected amount and UTR; deduplicate before fulfillment.
 }
 
 http_response_code(200);
@@ -519,13 +568,15 @@ func youpiWebhookHandler(w http.ResponseWriter, r *http.Request) {
 
 	var payload struct {
 		Event       string `json:"event"`
+		Method      string `json:"method"`
+		SettlementState string `json:"settlementState"`
 		OrderId     string `json:"orderId"`
 		UTR         string `json:"utr"`
 		Amount      string `json:"amount"`
 		AmountPaise int64  `json:"amountPaise"`
 	}
-	if err := json.Unmarshal(rawBody, &payload); err == nil && payload.Event == "SUCCESS" {
-		// Fulfill order: payload.OrderId, payload.UTR, payload.Amount
+	if err := json.Unmarshal(rawBody, &payload); err == nil && payload.Event == "RECONCILED" && payload.Method == "UPI" && payload.SettlementState == "RECONCILED" {
+		// Validate order, currency, expected amount and UTR; deduplicate before fulfillment.
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -633,6 +684,9 @@ Deep-dive engineering manuals and operational runbooks are available in the [`/d
 | [`docs/MERCHANT_INTEGRATION.md`](docs/MERCHANT_INTEGRATION.md)             | Full developer integration guide, SDK methods & webhooks   |
 | [`docs/WHITE_LABEL.md`](docs/WHITE_LABEL.md)                               | White-label branding customizer, domains & Cloudflare      |
 | [`docs/OPERATIONS_TROUBLESHOOTING.md`](docs/OPERATIONS_TROUBLESHOOTING.md) | Production operations, logs, diagnostics & troubleshooting |
+| [`PAYMENT_INTEGRATION_GUIDE.md`](PAYMENT_INTEGRATION_GUIDE.md)             | Fins & Wings manual UPI checkout, webhook, and admin verification flow |
+| [`SECURITY_REMEDIATION_REPORT.md`](SECURITY_REMEDIATION_REPORT.md)         | Manual UPI security posture, findings, and remaining blockers |
+| [`DEPLOYMENT_CHECKLIST.md`](DEPLOYMENT_CHECKLIST.md)                       | Production readiness checks; deployment is not included in this work |
 | [`openapi.yaml`](openapi.yaml)                                             | Official OpenAPI 3.0 REST API specification                |
 
 <br/>

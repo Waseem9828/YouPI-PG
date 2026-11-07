@@ -1,3 +1,7 @@
+# Temporary and Development Executables
+cloudflared.exe
+.vscode/
+
 # Dependencies
 node_modules/
 .pnp
@@ -27,6 +31,8 @@ local.properties
 
 # Environment and Secrets
 .env
+.env.*
+!.env.example
 .env.local
 .env.development.local
 .env.test.local

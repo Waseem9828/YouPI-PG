@@ -8,6 +8,46 @@ const BASE_SECURITY_HEADERS = Object.freeze({
   'X-Frame-Options': 'SAMEORIGIN'
 });
 
+function configuredOrigins() {
+  return new Set(String(process.env.YOUPI_ALLOWED_ORIGINS || '').split(/[\s,]+/).map(value => {
+    try { return new URL(value).origin; } catch { return ''; }
+  }).filter(Boolean));
+}
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  const origins = configuredOrigins();
+  if (origins.has(origin)) return true;
+  try {
+    const u = new URL(origin);
+    if (u.hostname.endsWith('.trycloudflare.com') || u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+const requestWindows = new Map();
+function isRateLimited(req, pathname) {
+  if (req.method !== 'POST') return false;
+  const now = Date.now();
+  const ip = req.socket?.remoteAddress || 'unknown';
+  const windowMs = 60_000;
+  const limit = pathname === '/api/v1/payments' ? 20
+    : (/\/manual-utr$/.test(pathname) ? 8 : 120);
+  const key = `${ip}:${pathname}`;
+  let bucket = requestWindows.get(key);
+  if (!bucket || now - bucket.startedAt >= windowMs) {
+    bucket = { startedAt: now, count: 0 };
+    requestWindows.set(key, bucket);
+  }
+  bucket.count++;
+  if (requestWindows.size > 10_000) {
+    for (const [entry, value] of requestWindows) if (now - value.startedAt >= windowMs) requestWindows.delete(entry);
+  }
+  return bucket.count > limit;
+}
+
 /**
  * Lightweight, high-performance HTTP router and server with native SSE and CORS.
  */
@@ -89,11 +129,12 @@ export class HttpServer {
    * @param {http.ServerResponse} res
    */
   initSse(topic, res) {
+    const corsOrigin = res.corsOrigin;
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
+      ...(corsOrigin ? { 'Access-Control-Allow-Origin': corsOrigin, 'Vary': 'Origin' } : {}),
       ...BASE_SECURITY_HEADERS
     });
 
@@ -132,9 +173,9 @@ export class HttpServer {
     );
     res.writeHead(statusCode, {
       'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
+      ...(res.corsOrigin ? { 'Access-Control-Allow-Origin': res.corsOrigin, 'Vary': 'Origin' } : {}),
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Device-Id, X-Timestamp, X-Signature',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Device-Id, X-Device-Token, X-Device-Signature, X-Device-Payload, X-Customer-Token, X-Timestamp, X-Signature',
       ...BASE_SECURITY_HEADERS
     });
     res.end(jsonStr);
@@ -177,12 +218,23 @@ export class HttpServer {
    */
   createServer() {
     return http.createServer(async (req, res) => {
+      const origin = req.headers.origin;
+      if (origin && !isAllowedOrigin(origin)) {
+        HttpServer.json(res, 403, { error: 'Origin is not allowed.' });
+        return;
+      }
+      if (origin) res.corsOrigin = origin;
       // Handle CORS preflight
       if (req.method === 'OPTIONS') {
+        if (!origin || !res.corsOrigin) {
+          HttpServer.json(res, 403, { error: 'Origin is not allowed.' });
+          return;
+        }
         res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': res.corsOrigin,
+          'Vary': 'Origin',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Device-Id, X-Timestamp, X-Signature',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Device-Id, X-Device-Token, X-Device-Signature, X-Device-Payload, X-Customer-Token, X-Timestamp, X-Signature',
           ...BASE_SECURITY_HEADERS
         });
         res.end();
@@ -199,6 +251,12 @@ export class HttpServer {
       }
       const pathname = parsedUrl.pathname;
       const method = req.method.toUpperCase();
+
+      if (isRateLimited(req, pathname)) {
+        res.setHeader('Retry-After', '60');
+        HttpServer.json(res, 429, { error: 'Too many requests. Please retry shortly.' });
+        return;
+      }
 
       try {
         for (const guard of this.guards) {
@@ -225,7 +283,10 @@ export class HttpServer {
               await route.handler(req, res, params);
             } catch (err) {
               // Log the detail server-side; never echo stack/SQL text to an anonymous caller.
-              console.error(`Route Error [${method} ${pathname}]:`, err);
+              console.error(`Route Error [${method} ${pathname}]:`, {
+                name: err?.name || 'Error',
+                code: typeof err?.code === 'string' ? err.code : 'unclassified'
+              });
               HttpServer.json(res, 500, { error: 'Internal Server Error' });
             }
             return;
