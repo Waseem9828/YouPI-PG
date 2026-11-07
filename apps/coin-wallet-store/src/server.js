@@ -597,8 +597,14 @@ export class CoinWalletStoreServer {
               createdAt: Date.now()
             });
 
-            // Normalize checkoutUrl to relative path so it seamlessly works on localhost, LAN IP, and Cloudflare HTTPS
-            const resolvedCheckoutUrl = `/checkout/${payment.paymentId}`;
+            // Normalize checkoutUrl: Use relative path `/checkout/:id` so it always works seamlessly on any cloud origin or port
+            let resolvedCheckoutUrl = `/checkout/${payment.paymentId}`;
+            if (payment.checkoutUrl && !payment.checkoutUrl.includes('localhost:7000')) {
+              try {
+                const u = new URL(payment.checkoutUrl);
+                if (u.protocol === 'https:') resolvedCheckoutUrl = payment.checkoutUrl;
+              } catch {}
+            }
 
             res.writeHead(200, {
               'Content-Type': 'application/json',
@@ -610,9 +616,9 @@ export class CoinWalletStoreServer {
               checkoutUrl: resolvedCheckoutUrl
             }));
           } catch (err) {
-            console.error('[Coin Wallet Store] /api/checkout failed:', err);
+            console.error('[Coin Wallet Store] /api/checkout failed:', err.message || err);
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unable to create payment', details: err.message }));
+            res.end(JSON.stringify({ error: err.message || 'Unable to create payment', details: err.message }));
           }
         });
         return;

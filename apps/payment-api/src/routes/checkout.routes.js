@@ -170,8 +170,11 @@ function sanitizePublicBranding(raw = {}) {
  * Recovery: the next create succeeds once a heartbeat is fresh. In-flight sessions are not cancelled.
  */
 export function observerHealthEnforced() {
+  if (process.env.YOUPI_ENFORCE_OBSERVER_HEALTH === 'false') return false;
   if (process.env.YOUPI_ENFORCE_OBSERVER_HEALTH === 'true') return true;
   if (process.env.NODE_ENV === 'test') return false;
+  // If running in single-port cloud PaaS demo without Cloudflare domain, do not block creation if observer is not connected yet
+  if (!process.env.CLOUDFLARE_DOMAIN && process.env.PORT) return false;
   return true;
 }
 

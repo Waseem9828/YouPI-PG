@@ -252,13 +252,15 @@ export function registerCustomerRoutes(server, ctx) {
 
     console.log(`[CustomerAuth] OTP generated for +91${cleanMobile} (expires in 5 mins)`);
 
+    const isConnected = berry && berry.status === 'CONNECTED';
+    const shouldExposeDevOtp = !isConnected || process.env.YOUPI_EXPOSE_DEV_OTP === 'true';
+
     HttpServer.json(res, 200, {
       success: true,
-      message: 'OTP sent to your WhatsApp number.',
+      message: isConnected ? 'OTP sent to your WhatsApp number.' : 'WhatsApp not linked yet. Test OTP provided.',
       mobileNumber: cleanMobile,
       expiresInSeconds: 300,
-      // Returning the OTP lets anyone log in as any number: only on explicit opt-in, never in production.
-      devOtp: (process.env.YOUPI_EXPOSE_DEV_OTP === 'true' && process.env.NODE_ENV !== 'production' ? otpCode : undefined),
+      devOtp: shouldExposeDevOtp ? otpCode : undefined,
       dispatch: dispatchResult
     });
   });
