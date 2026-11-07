@@ -45,8 +45,17 @@ if (runInLocalhostMode) {
   console.log('====================================================');
 }
 
-// Check if running on a single-port PaaS environment (e.g., Render, Railway, Koyeb)
-const isCloudPaaS = Boolean(process.env.PORT && !process.env.PAYMENT_API_PORT && !process.env.CLOUDFLARE_DOMAIN);
+// Check if running on a single-port PaaS environment (e.g., Render, Railway, Koyeb, Fly.io, Heroku)
+const isCloudPaaS = Boolean(
+  process.env.RENDER ||
+  process.env.RENDER_SERVICE_ID ||
+  process.env.RENDER_EXTERNAL_URL ||
+  process.env.RAILWAY_STATIC_URL ||
+  process.env.KOYEB_APP_NAME ||
+  process.env.FLY_APP_NAME ||
+  process.env.DYNO ||
+  (process.env.PORT && !process.env.CLOUDFLARE_DOMAIN)
+);
 if (isCloudPaaS) {
   console.log(`[i] Single-port cloud environment detected (PORT=${process.env.PORT}). Delegating to unified cloud gateway...`);
   await import('./start-render-demo.js');
