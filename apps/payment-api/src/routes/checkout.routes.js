@@ -386,28 +386,28 @@ export async function checkUpiServerHealth(ctx, enabledMethods = [], sellingMode
 
   if (smsHealthy || gmailHealthy) {
     return {
-      status: 'WORKING',
-      tier: 'GREEN',
-      label: 'Server Is Working',
+      status: 'BUSY',
+      tier: 'YELLOW',
+      label: 'UPI Server Busy',
       isWorking: true,
-      reason: smsHealthy ? 'SMS observer active' : 'Gmail observer active',
-      smsHealthy: true,
-      gmailHealthy: true,
-      warning: null,
+      reason: smsHealthy ? 'SMS observer active, Gmail observer offline' : 'Gmail observer active, SMS observer offline',
+      smsHealthy,
+      gmailHealthy,
+      warning: 'Your payment may go through extra processing seconds.',
       recommendedAlternative: null
     };
   }
 
   return {
-    status: 'WORKING',
-    tier: 'GREEN',
-    label: 'Server Is Working',
-    isWorking: true,
-    reason: 'UPI services fully operational',
-    smsHealthy: true,
-    gmailHealthy: true,
-    warning: null,
-    recommendedAlternative: null
+    status: 'ISSUES',
+    tier: 'RED',
+    label: 'Server Facing Issues',
+    isWorking: false,
+    reason: 'Both Gmail OAuth and SMS Gateway are offline or unconfigured',
+    smsHealthy: false,
+    gmailHealthy: false,
+    warning: 'It is not recommended to pay by UPI right now as the server is facing downtime. We recommend paying by cash instead.',
+    recommendedAlternative: hasCash ? 'CASH' : null
   };
 }
 
@@ -1101,65 +1101,66 @@ export function registerCheckoutRoutes(server, ctx) {
 
   // POST /api/v1/checkout/:id/payment-done
   server.post('/api/v1/checkout/:id/payment-done', async (req, res, params) => {
-    const body = await HttpServer.parseBody(req).catch(() => ({}));
     const session = ctx.sessionRepo.findById(params.id);
     if (!session) {
       HttpServer.json(res, 404, { error: `Payment session not found: ${params.id}` });
       return;
     }
 
-    if (session.status === PaymentStatus.SUCCESS) {
+    const deviceAccess = checkSessionDeviceAccess(session, req, null, ctx);
+    if (!deviceAccess.allowed) {
+      HttpServer.json(res, deviceAccess.statusCode || 409, deviceAccess.body);
+      return;
+    }
+
+    if (session.status === PaymentStatus.PROCESSING) {
+      // Idempotent
       HttpServer.json(res, 200, {
-        paymentId: session.id,
-        status: PaymentStatus.SUCCESS,
-        isSuccess: true
+        status: PaymentStatus.PROCESSING,
+        message: 'Already in verification processing.'
       });
       return;
     }
 
-    const utr = String(body.utr || session.customerUtr || `UPI${Date.now().toString().slice(-8)}`).trim().toUpperCase();
-    const now = new Date().toISOString();
-    try {
-      if (ctx.sessionRepo.db) {
-        ctx.sessionRepo.db.execute(`
-          UPDATE payment_sessions
-          SET status = ?, customer_utr = ?, utr_submitted_at = ?, completed_at = ?, updated_at = ?
-          WHERE id = ?
-        `, [PaymentStatus.SUCCESS, utr, now, now, now, session.id]);
+    const now = Date.now();
+    if (session.status === PaymentStatus.ACTIVE && session.expiresAt && session.expiresAt.getTime() <= now) {
+      ctx.sessionRepo.transitionToTerminal(session.id, PaymentStatus.EXPIRED);
+      if (session.receivingAccountId) {
+        ctx.queueEngine.promoteNext(session.receivingAccountId);
       }
-      const updated = ctx.sessionRepo.findById(session.id);
-
-      if (ctx.eventEmitter) {
-        ctx.eventEmitter.emit('PAYMENT.SUCCESS', {
-          paymentId: updated.id,
-          orderId: updated.orderId,
-          merchantId: updated.merchantId,
-          amountPaise: updated.amountPaise,
-          utr
-        });
-      }
-
-      if (ctx.webhookEngine) {
-        ctx.webhookEngine.dispatch('SUCCESS', updated).catch(err => console.error('[Webhook dispatch error]', err));
-      }
-
-      server.broadcastSse(updated.id, 'status_change', {
-        status: PaymentStatus.SUCCESS,
-        utr,
-        orderId: updated.orderId
+      server.broadcastSse(session.id, 'status_change', { status: PaymentStatus.EXPIRED });
+      HttpServer.json(res, 400, {
+        error: 'Cannot start verification: payment session has EXPIRED.'
       });
-
-      HttpServer.json(res, 200, {
-        paymentId: updated.id,
-        orderId: updated.orderId,
-        status: PaymentStatus.SUCCESS,
-        utr: updated.customerUtr || utr,
-        isSuccess: true,
-        message: 'Payment confirmed successfully!'
-      });
-    } catch (err) {
-      HttpServer.json(res, 400, { error: err.message || 'Could not verify payment' });
+      return;
     }
+
+    if (session.status !== PaymentStatus.ACTIVE) {
+      HttpServer.json(res, 400, {
+        error: `Cannot start verification: session is in status '${session.status}', must be 'ACTIVE'.`
+      });
+      return;
+    }
+
+    const updated = ctx.timingEngine.handlePaymentDone(params.id);
+
+    // Broadcast SSE update
+    server.broadcastSse(params.id, 'status_change', {
+      status: PaymentStatus.PROCESSING,
+      processingExpiresAt: updated.processingExpiresAt
+    });
+    server.broadcastSse('admin_counter_events', 'status_change', {
+      status: PaymentStatus.PROCESSING,
+      sessionId: updated.id,
+      orderId: updated.orderId,
+      amountPaise: updated.amountPaise ? updated.amountPaise.toString() : '0'
+    });
+
+    HttpServer.json(res, 200, {
+      paymentId: updated.id,
+      status: PaymentStatus.PROCESSING,
+      processingExpiresAt: updated.processingExpiresAt
+    });
   });
 
   // POST /api/v1/checkout/:id/cancel

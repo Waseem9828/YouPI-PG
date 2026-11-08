@@ -61,8 +61,8 @@ export function isProductionLike(env = process.env) {
 export function checkoutFrameHeaders(env = process.env) {
   const configured = frameAncestorOrigins(env.CHECKOUT_FRAME_ANCESTORS);
   const frameAncestors = configured.length
-    ? `'self' ${configured.join(' ')} https://*.trycloudflare.com`
-    : (isProductionLike(env) ? "'self' https://*.trycloudflare.com" : '*');
+    ? `'self' ${configured.join(' ')}`
+    : (isProductionLike(env) ? "'self'" : '*');
   return {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'strict-origin-when-cross-origin',

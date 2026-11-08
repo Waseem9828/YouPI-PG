@@ -1,4 +1,18 @@
 
+    const PAYMENT_ID = (typeof window !== 'undefined' && window.PAYMENT_ID) || (function () {
+      try {
+        const parts = window.location.pathname.split('/');
+        const idx = parts.indexOf('checkout');
+        if (idx !== -1 && parts[idx + 1]) return parts[idx + 1];
+      } catch { }
+      return '';
+    })();
+    const API_BASE = (typeof window !== 'undefined' && window.API_BASE) || (typeof window !== 'undefined' ? window.location.origin : '');
+    if (typeof window !== 'undefined') {
+      if (!window.PAYMENT_ID) window.PAYMENT_ID = PAYMENT_ID;
+      if (!window.API_BASE) window.API_BASE = API_BASE;
+    }
+
     let state = null;
     let countdownTimer = null;
     let queuePollTimer = null;
@@ -240,23 +254,38 @@
     function getStoreReturnUrl() {
       if (typeof state !== 'undefined' && state) {
         if (state.cancelUrl) {
-          return state.cancelUrl;
+          const safeCancel = sanitizeRedirectUrl(state.cancelUrl);
+          if (safeCancel) return safeCancel;
         }
         if (state.returnUrl) {
-          try {
-            const parsed = new URL(state.returnUrl);
-            return parsed.origin ? `${parsed.origin}/` : state.returnUrl;
-          } catch (e) { }
+          const safeReturn = sanitizeRedirectUrl(state.returnUrl);
+          if (safeReturn) {
+            try {
+              const parsed = new URL(safeReturn);
+              return parsed.origin ? `${parsed.origin}/` : safeReturn;
+            } catch (e) { }
+          }
         }
       }
       try {
         const params = new URLSearchParams(window.location.search);
         const cancelParam = params.get('cancelUrl') || params.get('cancel_url');
-        if (cancelParam) return cancelParam;
+        if (cancelParam) {
+          const safeCancel = sanitizeRedirectUrl(cancelParam);
+          if (safeCancel) return safeCancel;
+        }
         const qUrl = params.get('returnUrl') || params.get('storeUrl') || params.get('redirectUrl');
         if (qUrl) {
-          const parsed = new URL(qUrl, window.location.origin);
-          return parsed.origin ? `${parsed.origin}/` : qUrl;
+          const safeQ = sanitizeRedirectUrl(qUrl);
+          if (safeQ) {
+            const parsed = new URL(safeQ, window.location.origin);
+            return parsed.origin ? `${parsed.origin}/` : safeQ;
+          }
+        }
+        const storeUrl = params.get('storeUrl');
+        if (storeUrl) {
+          const safeStore = sanitizeRedirectUrl(storeUrl);
+          if (safeStore) return safeStore;
         }
       } catch (e) { }
       if (document.referrer) {
@@ -2373,9 +2402,10 @@
 
     // Listen for cancel requests from parent iframe cross button
     window.addEventListener('message', (e) => {
-      if (e.data && e.data.event === 'youpi.request_cancel') {
-        openCancelPaymentModal();
-      }
+      if (!e.data || e.data.event !== 'youpi.request_cancel') return;
+      const merchantOrigin = resolveMerchantOrigin();
+      if (merchantOrigin && e.origin !== merchantOrigin) return;
+      openCancelPaymentModal();
     });
 
     // --- MANUAL PAYMENT DONE VERIFICATION ---

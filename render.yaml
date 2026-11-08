@@ -4,6 +4,7 @@ services:
     name: youpi-pg-demo
     runtime: node
     plan: free
+    autoDeploy: true
     buildCommand: npm ci
     startCommand: node scripts/start-render-demo.js
     healthCheckPath: /health
@@ -15,8 +16,14 @@ services:
       - key: NODE_ENV
         value: production
 
+      - key: YOUPI_MODE
+        value: production
+
       - key: YOUPI_BIND_HOST
         value: 0.0.0.0
+
+      - key: YOUPI_ALLOW_LOCALHOST_MODE
+        value: "true"
 
       - key: USE_SQLITE_FALLBACK
         value: "true"
@@ -38,3 +45,6 @@ services:
 
       - key: ADMIN_API_TOKEN
         generateValue: true
+
+      - key: DEFAULT_APP_NAME
+        value: "YouPI Gateway"
