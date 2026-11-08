@@ -9,19 +9,40 @@ const BASE_SECURITY_HEADERS = Object.freeze({
 });
 
 function configuredOrigins() {
-  return new Set(String(process.env.YOUPI_ALLOWED_ORIGINS || '').split(/[\s,]+/).map(value => {
+  const set = new Set(String(process.env.YOUPI_ALLOWED_ORIGINS || '').split(/[\s,]+/).map(value => {
     try { return new URL(value).origin; } catch { return ''; }
   }).filter(Boolean));
+  if (process.env.RENDER_EXTERNAL_URL) {
+    try { set.add(new URL(process.env.RENDER_EXTERNAL_URL).origin); } catch {}
+  }
+  if (process.env.YOUPI_PUBLIC_URL) {
+    try { set.add(new URL(process.env.YOUPI_PUBLIC_URL).origin); } catch {}
+  }
+  return set;
 }
 
-function isAllowedOrigin(origin) {
+function isAllowedOrigin(origin, req) {
   if (!origin) return true;
   const origins = configuredOrigins();
   if (origins.has(origin)) return true;
   try {
     const u = new URL(origin);
-    if (u.hostname.endsWith('.trycloudflare.com') || u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+    if (
+      u.hostname.endsWith('.trycloudflare.com') ||
+      u.hostname.endsWith('.onrender.com') ||
+      u.hostname.endsWith('.railway.app') ||
+      u.hostname.endsWith('.koyeb.app') ||
+      u.hostname.endsWith('.fly.dev') ||
+      u.hostname === 'localhost' ||
+      u.hostname === '127.0.0.1'
+    ) {
       return true;
+    }
+    if (req) {
+      const host = req.headers['x-forwarded-host'] || req.headers.host;
+      if (host && (host === u.host || host === u.hostname)) {
+        return true;
+      }
     }
   } catch {}
   return false;
@@ -219,7 +240,7 @@ export class HttpServer {
   createServer() {
     return http.createServer(async (req, res) => {
       const origin = req.headers.origin;
-      if (origin && !isAllowedOrigin(origin)) {
+      if (origin && !isAllowedOrigin(origin, req)) {
         HttpServer.json(res, 403, { error: 'Origin is not allowed.' });
         return;
       }
