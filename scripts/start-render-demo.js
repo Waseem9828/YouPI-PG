@@ -181,12 +181,11 @@ const unifiedServer = http.createServer((req, res) => {
     return;
   }
 
-  // Merchant Admin and Admin API endpoints
+  // Merchant Admin UI and supervisor endpoints (tickets, process services, log streaming)
   if (
     pathname === '/admin' ||
     pathname.startsWith('/admin/') ||
-    pathname.startsWith('/api/admin/') ||
-    pathname.startsWith('/api/v1/admin/') ||
+    pathname === '/api/admin/tickets' ||
     pathname.startsWith('/api/services') ||
     pathname === '/api/logs/stream'
   ) {
