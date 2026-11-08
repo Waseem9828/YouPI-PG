@@ -48,3 +48,6 @@ services:
 
       - key: DEFAULT_APP_NAME
         value: "YouPI Gateway"
+
+      - key: YOUPI_ALLOWED_ORIGINS
+        value: "https://youpi-pg-3l9g.onrender.com"

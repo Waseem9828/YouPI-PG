@@ -141,6 +141,11 @@ export function registerPaymentRoutes(server, ctx) {
       const isAllowedReturn = allowedReturnOrigins.length === 0
         || allowedReturnOrigins.includes(parsedReturnUrl.origin)
         || parsedReturnUrl.hostname.endsWith('.trycloudflare.com')
+        || parsedReturnUrl.hostname.endsWith('.onrender.com')
+        || parsedReturnUrl.hostname.endsWith('.railway.app')
+        || parsedReturnUrl.hostname.endsWith('.koyeb.app')
+        || parsedReturnUrl.hostname.endsWith('.fly.dev')
+        || (process.env.RENDER_EXTERNAL_URL && parsedReturnUrl.origin === new URL(process.env.RENDER_EXTERNAL_URL).origin)
         || parsedReturnUrl.hostname === 'localhost'
         || parsedReturnUrl.hostname === '127.0.0.1';
       if (!isAllowedReturn) {

@@ -8,6 +8,7 @@ import { CheckoutServer } from '../apps/checkout-portal/src/server.js';
 import { AdminServer } from '../apps/merchant-admin/src/server.js';
 import { CoinWalletStoreServer } from '../apps/coin-wallet-store/src/server.js';
 import { seedImamMerchant } from './setup-imam-merchant.js';
+import { seedSadafMerchant } from './setup-sadaf-merchant.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,11 +28,12 @@ process.env.YOUPI_ENFORCE_OBSERVER_HEALTH = process.env.YOUPI_ENFORCE_OBSERVER_H
 const paymentApp = createPaymentApp();
 const coreServer = paymentApp.rawServer;
 
-// Seed Imam Tankhwah merchant & receiving account for cloud multi-tenant deployment
+// Seed Imam Tankhwah & SADAF Computer Centre merchants for cloud deployment
 try {
   seedImamMerchant(paymentApp.context.db);
+  seedSadafMerchant(paymentApp.context.db);
 } catch (e) {
-  console.warn('[Cloud Seed] Imam merchant seed note:', e.message);
+  console.warn('[Cloud Seed] Merchant seed note:', e.message);
 }
 
 // Keep a simulated active Android observer heartbeat in the database so the gateway indicator is continuously GREEN
